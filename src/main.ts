@@ -137,6 +137,7 @@ export default class MarkwayPlugin extends Plugin {
 		try {
 			const result = await this.runMarkway([
 				"doctor",
+				"--journal-access",
 				...this.journalToolOption(),
 			]);
 			this.setStatus("Markway doctor passed");
@@ -232,7 +233,7 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private reportError(message: string, error: unknown) {
-		const detail = error instanceof Error ? error.message : String(error);
+		const detail = explainMarkwayError(error);
 		this.setStatus(message);
 		new Notice(`${message}: ${detail}`);
 		console.error(message, error);
@@ -363,6 +364,23 @@ function describeUnknown(value: unknown): string {
 	}
 
 	return JSON.stringify(value) ?? "Unknown error";
+}
+
+function explainMarkwayError(value: unknown): string {
+	const message = describeUnknown(value);
+	if (
+		message.includes("group.com.apple.moments")
+		|| message.includes("Sandbox access to file-read-data denied")
+		|| message.includes("Apple Journal access was denied")
+		|| message.includes("moments.sqlite")
+	) {
+		return [
+			"macOS denied Obsidian access to Apple Journal.",
+			"Grant Full Disk Access to Obsidian.app, restart Obsidian, then run Markway: Run doctor.",
+		].join(" ");
+	}
+
+	return message;
 }
 
 function defaultMarkwayPath(): string {
