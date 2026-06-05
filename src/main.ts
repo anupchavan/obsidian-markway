@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { existsSync } from "fs";
 import {
 	FileSystemAdapter,
 	Notice,
@@ -18,7 +19,7 @@ interface MarkwaySettings {
 }
 
 const DEFAULT_SETTINGS: MarkwaySettings = {
-	markwayPath: "/Users/anup/projects/markway/.build/debug/markway",
+	markwayPath: defaultMarkwayPath(),
 	journalToolPath: "/Users/anup/projects/markway/Vendor/AppleJournalCRDT/tools/journal_text.zsh",
 	autoScan: false,
 	debounceMs: 1200,
@@ -67,6 +68,14 @@ export default class MarkwayPlugin extends Plugin {
 			name: "Run doctor",
 			callback: () => {
 				void this.runDoctor();
+			},
+		});
+
+		this.addCommand({
+			id: "diagnostics",
+			name: "Show diagnostics",
+			callback: () => {
+				void this.showDiagnostics();
 			},
 		});
 
@@ -135,6 +144,21 @@ export default class MarkwayPlugin extends Plugin {
 		} catch (error) {
 			this.reportError("Markway doctor failed", error);
 		}
+	}
+
+	private async showDiagnostics() {
+		const lines = [
+			`vault: ${this.safeValue(() => this.vaultPath())}`,
+			`markway: ${this.settings.markwayPath}`,
+			`markway exists: ${existsSync(this.settings.markwayPath)}`,
+			`journal helper: ${this.settings.journalToolPath}`,
+			`journal helper exists: ${existsSync(this.settings.journalToolPath)}`,
+			`active file: ${this.app.workspace.getActiveFile()?.path ?? "(none)"}`,
+		];
+		const message = lines.join("\n");
+		this.setStatus("Markway diagnostics ready");
+		new Notice(message, 12000);
+		console.debug(message);
 	}
 
 	private async scanVault(reason: string) {
@@ -212,6 +236,14 @@ export default class MarkwayPlugin extends Plugin {
 		this.setStatus(message);
 		new Notice(`${message}: ${detail}`);
 		console.error(message, error);
+	}
+
+	private safeValue(read: () => string): string {
+		try {
+			return read();
+		} catch (error) {
+			return describeUnknown(error);
+		}
 	}
 }
 
@@ -331,4 +363,12 @@ function describeUnknown(value: unknown): string {
 	}
 
 	return JSON.stringify(value) ?? "Unknown error";
+}
+
+function defaultMarkwayPath(): string {
+	const installed = "/Users/anup/.local/bin/markway";
+	if (existsSync(installed)) {
+		return installed;
+	}
+	return "/Users/anup/projects/markway/.build/debug/markway";
 }
