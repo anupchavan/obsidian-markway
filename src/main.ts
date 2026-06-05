@@ -417,8 +417,8 @@ function explainMarkwayError(value: unknown): string {
 		|| message.includes("moments.sqlite")
 	) {
 		return [
-			"macOS denied Obsidian access to Apple Journal.",
-			"Grant Full Disk Access to Obsidian.app, restart Obsidian, then run Markway: Run doctor.",
+			"macOS denied Markway.app access to Apple Journal.",
+			"Grant Full Disk Access to Markway.app, fully quit and reopen Markway.app, then start the bridge again.",
 		].join(" ");
 	}
 
