@@ -1,5 +1,8 @@
 import { execFile } from "child_process";
+import { randomUUID } from "crypto";
 import { existsSync } from "fs";
+import { mkdir, readFile, rm, writeFile } from "fs/promises";
+import { join } from "path";
 import {
 	FileSystemAdapter,
 	Notice,
@@ -12,7 +15,6 @@ import {
 
 interface MarkwaySettings {
 	markwayPath: string;
-	journalToolPath: string;
 	autoScan: boolean;
 	debounceMs: number;
 	vaultPathOverride: string;
@@ -20,7 +22,6 @@ interface MarkwaySettings {
 
 const DEFAULT_SETTINGS: MarkwaySettings = {
 	markwayPath: defaultMarkwayPath(),
-	journalToolPath: "/Users/anup/projects/markway/Vendor/AppleJournalCRDT/tools/journal_text.zsh",
 	autoScan: false,
 	debounceMs: 1200,
 	vaultPathOverride: "",
@@ -29,6 +30,22 @@ const DEFAULT_SETTINGS: MarkwaySettings = {
 interface CommandResult {
 	stdout: string;
 	stderr: string;
+}
+
+interface BridgeRequest {
+	id: string;
+	kind: "doctor" | "journalPush";
+	filePath?: string;
+	title?: string;
+	requestedAt: string;
+}
+
+interface BridgeResponse {
+	id: string;
+	ok: boolean;
+	message: string;
+	journalID?: string;
+	completedAt: string;
 }
 
 export default class MarkwayPlugin extends Plugin {
@@ -135,13 +152,12 @@ export default class MarkwayPlugin extends Plugin {
 
 	private async runDoctor() {
 		try {
-			const result = await this.runMarkway([
-				"doctor",
-				"--journal-access",
-				...this.journalToolOption(),
-			]);
+			const result = await this.sendBridgeRequest({ kind: "doctor" }, 15000);
+			if (!result.ok) {
+				throw new Error(result.message);
+			}
 			this.setStatus("Markway doctor passed");
-			new Notice(result.stdout.trim() || "Markway doctor passed");
+			new Notice(result.message || "Markway doctor passed");
 		} catch (error) {
 			this.reportError("Markway doctor failed", error);
 		}
@@ -152,8 +168,7 @@ export default class MarkwayPlugin extends Plugin {
 			`vault: ${this.safeValue(() => this.vaultPath())}`,
 			`markway: ${this.settings.markwayPath}`,
 			`markway exists: ${existsSync(this.settings.markwayPath)}`,
-			`journal helper: ${this.settings.journalToolPath}`,
-			`journal helper exists: ${existsSync(this.settings.journalToolPath)}`,
+			`bridge: ${this.bridgeRoot()}`,
 			`active file: ${this.app.workspace.getActiveFile()?.path ?? "(none)"}`,
 		];
 		const message = lines.join("\n");
@@ -176,14 +191,14 @@ export default class MarkwayPlugin extends Plugin {
 	private async pushFile(file: TFile) {
 		try {
 			const absolutePath = `${this.vaultPath()}/${file.path}`;
-			const result = await this.runMarkway([
-				"journal",
-				"push",
-				absolutePath,
-				"--no-write-frontmatter",
-				...this.journalToolOption(),
-			]);
-			const id = result.stdout.trim();
+			const result = await this.sendBridgeRequest({
+				kind: "journalPush",
+				filePath: absolutePath,
+			});
+			if (!result.ok || !result.journalID) {
+				throw new Error(result.message || "Markway app did not return a Journal ID.");
+			}
+			const id = result.journalID;
 			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 				const metadata = frontmatter as Record<string, string>;
 				metadata["markway.appleJournalID"] = id;
@@ -194,6 +209,42 @@ export default class MarkwayPlugin extends Plugin {
 		} catch (error) {
 			this.reportError(`Markway push failed for ${file.path}`, error);
 		}
+	}
+
+	private async sendBridgeRequest(
+		request: Omit<BridgeRequest, "id" | "requestedAt">,
+		timeoutMs = 60000
+	): Promise<BridgeResponse> {
+		const id = randomUUID().toUpperCase();
+		const fullRequest: BridgeRequest = {
+			id,
+			requestedAt: new Date().toISOString(),
+			...request,
+		};
+		const requestsDir = this.requestsDir();
+		const responsesDir = this.responsesDir();
+		await mkdir(requestsDir, { recursive: true });
+		await mkdir(responsesDir, { recursive: true });
+		await writeFile(join(requestsDir, `${id}.json`), JSON.stringify(fullRequest, null, 2), "utf8");
+		this.setStatus(`Markway request queued: ${request.kind}`);
+		return await this.waitForBridgeResponse(id, timeoutMs);
+	}
+
+	private async waitForBridgeResponse(id: string, timeoutMs: number): Promise<BridgeResponse> {
+		const responsePath = join(this.responsesDir(), `${id}.json`);
+		const started = Date.now();
+		while (Date.now() - started < timeoutMs) {
+			if (existsSync(responsePath)) {
+				const text = await readFile(responsePath, "utf8");
+				await rm(responsePath, { force: true });
+				return JSON.parse(text) as BridgeResponse;
+			}
+			await sleep(350);
+		}
+
+		throw new Error(
+			"Timed out waiting for Markway.app. Open Markway, set this vault path, and start the bridge."
+		);
 	}
 
 	private runMarkway(args: string[]): Promise<CommandResult> {
@@ -223,9 +274,16 @@ export default class MarkwayPlugin extends Plugin {
 		throw new Error("Markway needs a local desktop vault path.");
 	}
 
-	private journalToolOption(): string[] {
-		const path = this.settings.journalToolPath.trim();
-		return path ? ["--journal-tool", path] : [];
+	private bridgeRoot(): string {
+		return join(this.vaultPath(), ".markway");
+	}
+
+	private requestsDir(): string {
+		return join(this.bridgeRoot(), "requests");
+	}
+
+	private responsesDir(): string {
+		return join(this.bridgeRoot(), "responses");
 	}
 
 	private setStatus(text: string) {
@@ -266,19 +324,6 @@ class MarkwaySettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.markwayPath)
 					.onChange(async (value) => {
 						this.plugin.settings.markwayPath = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
-
-			new Setting(containerEl)
-				.setName("Journal helper")
-				.setDesc("Path to journal_text.zsh while the journal backend is still vendored.")
-			.addText((text) =>
-				text
-					.setPlaceholder("Journal helper path")
-					.setValue(this.plugin.settings.journalToolPath)
-					.onChange(async (value) => {
-						this.plugin.settings.journalToolPath = value.trim();
 						await this.plugin.saveSettings();
 					})
 			);
@@ -335,9 +380,6 @@ function readSettings(value: unknown): Partial<MarkwaySettings> {
 	if (typeof value.markwayPath === "string") {
 		settings.markwayPath = value.markwayPath;
 	}
-	if (typeof value.journalToolPath === "string") {
-		settings.journalToolPath = value.journalToolPath;
-	}
 	if (typeof value.autoScan === "boolean") {
 		settings.autoScan = value.autoScan;
 	}
@@ -381,6 +423,10 @@ function explainMarkwayError(value: unknown): string {
 	}
 
 	return message;
+}
+
+function sleep(milliseconds: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function defaultMarkwayPath(): string {
