@@ -1,0 +1,11 @@
+{
+	"id": "markway",
+	"name": "Markway",
+	"version": "0.1.0",
+	"minAppVersion": "1.4.0",
+	"description": "Sync Apple services with Obsidian",
+	"author": "Anup Chavan",
+	"authorUrl": "https://anupchavan.com",
+	"fundingUrl": "https://github.com/sponsors/anupchavan",
+	"isDesktopOnly": true
+}
