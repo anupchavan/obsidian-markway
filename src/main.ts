@@ -1,21 +1,16 @@
 import { randomUUID } from "crypto";
-import { existsSync, watch } from "fs";
-import type { FSWatcher } from "fs";
-import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "fs/promises";
-import { homedir } from "os";
-import { basename, dirname, extname, join } from "path";
+import { existsSync } from "fs";
+import { basename, dirname, extname } from "path";
 import {
 	FileSystemAdapter,
 	Notice,
 	Plugin,
-	PluginSettingTab,
-	requireApiVersion,
-	Setting,
 	TAbstractFile,
 	TFile,
 } from "obsidian";
-import type { SettingDefinitionItem } from "obsidian";
 import { checkRules, firstFolderFromRules, type FrontmatterRecord } from "./rules";
+import { MarkwayBridgeClient, type BridgeRequest, type BridgeResponse } from "./bridge-client";
+import { registerMarkwayCommands } from "./commands";
 import {
 	journalTemplateNeedsMusic,
 	journalTemplateSettingsHash,
@@ -23,30 +18,29 @@ import {
 	renderJournalTemplateProperties,
 	stripGeneratedTitleHeading,
 } from "./journal-template";
-import { renderJournalTemplatePropertyRow, renderJournalTemplateSettings } from "./journal-template-ui";
-import { renderJournalRules } from "./rules-ui";
+import { MarkwaySettingTab } from "./settings";
 import {
-	DEFAULT_SETTINGS,
 	canonicalPath,
 	composeMarkdown,
 	describeUnknown,
 	explainMarkwayError,
 	hashJournalContent,
 	hasMatchingJournalSummary,
+	hasUnsyncedMarkdownContent,
+	isRecord,
 	isFileExistsError,
 	mergeSyncOptions,
-	normalizeDebounceMs,
 	normalizeFolder,
 	normalizePath,
 	preserveMarkdownStructure,
 	readPluginData,
+	removedGeneratedMusicAttachmentIDs,
 	sameVaultPath,
 	sanitizeFileName,
 	sha256Hex,
 	sleep,
 	splitMarkdown,
 	titleForFile,
-	validateDebounceValue,
 	vaultPathKey,
 	type JournalEntrySummary,
 	type JournalEntryText,
@@ -55,35 +49,6 @@ import {
 	type MarkwaySettings,
 	type SyncOptions,
 } from "./sync-utils";
-
-type MarkwaySettingKey = keyof MarkwaySettings;
-
-interface BridgeRequest {
-	id: string;
-	kind: "doctor" | "journalList" | "journalGet" | "journalPush" | "journalPull" | "journalDelete";
-	relativePath?: string;
-	journalID?: string;
-	title?: string;
-	includeMusicAttachments?: boolean;
-	stripTitleHeading?: boolean;
-	requestedAt: string;
-}
-
-interface BridgeResponse {
-	id: string;
-	ok: boolean;
-	message: string;
-	journalID?: string;
-	entry?: JournalEntryText;
-	entries?: JournalEntrySummary[];
-	completedAt: string;
-}
-
-interface BridgeEvent {
-	id: string;
-	kind: "journalChanged";
-	createdAt: string;
-}
 
 interface PushOptions {
 	force?: boolean;
@@ -95,21 +60,32 @@ export default class MarkwayPlugin extends Plugin {
 	settings: MarkwaySettings;
 	journalLinks: Record<string, JournalLink> = {};
 	private statusEl!: HTMLElement;
-	private bridgeEventWatcher: FSWatcher | null = null;
+	private bridge!: MarkwayBridgeClient;
 	private bridgeRequestsInFlight = 0;
-	private drainingBridgeEvents = false;
 	private journalSyncInProgress = false;
 	private queuedJournalSync: SyncOptions | null = null;
 	private journalSyncTimer: ReturnType<typeof setTimeout> | null = null;
 	private templateRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 	private syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private suppressedFilePaths = new Map<string, number>();
+	private recentLocalFileChanges = new Map<string, number>();
 
 	async onload() {
 		await this.loadPluginData();
 
 		this.statusEl = this.addStatusBarItem();
 		this.setStatus("Markway idle");
+		this.bridge = new MarkwayBridgeClient(
+			() => this.vaultPath(),
+			(text) => this.setStatus(text),
+			(message, error) => this.reportError(message, error),
+			() => {
+				this.bridgeRequestsInFlight += 1;
+			},
+			() => {
+				this.bridgeRequestsInFlight = Math.max(0, this.bridgeRequestsInFlight - 1);
+			}
+		);
 
 		this.addSettingTab(new MarkwaySettingTab(this));
 		this.app.workspace.onLayoutReady(() => {
@@ -119,7 +95,7 @@ export default class MarkwayPlugin extends Plugin {
 				void this.syncJournal({ includeNew: false, silent: true });
 			}
 		});
-		this.registerCommands();
+		registerMarkwayCommands(this);
 	}
 
 	onunload() {
@@ -135,8 +111,7 @@ export default class MarkwayPlugin extends Plugin {
 			clearTimeout(this.templateRefreshTimer);
 			this.templateRefreshTimer = null;
 		}
-		this.bridgeEventWatcher?.close();
-		this.bridgeEventWatcher = null;
+		this.bridge?.close();
 	}
 
 	async loadPluginData() {
@@ -154,120 +129,23 @@ export default class MarkwayPlugin extends Plugin {
 		await this.saveData(data);
 	}
 
-	private registerCommands() {
-		this.addCommand({
-			id: "doctor",
-			name: "Run doctor",
-			callback: () => {
-				void this.runDoctor();
-			},
-		});
-
-		this.addCommand({
-			id: "diagnostics",
-			name: "Show diagnostics",
-			callback: () => {
-				void this.showDiagnostics();
-			},
-		});
-
-		this.addCommand({
-			id: "sync-now",
-			name: "Sync journal now",
-			callback: () => {
-				void this.syncJournal({ includeNew: true, migrateFrontmatter: true });
-			},
-		});
-
-		this.addCommand({
-			id: "push-current-file",
-			name: "Push current file to journal",
-			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				const canRun = file instanceof TFile && file.extension === "md";
-				if (checking) {
-					return canRun;
-				}
-				if (canRun && file) {
-					void this.pushFile(file, { force: true });
-				}
-				return true;
-			},
-		});
-
-		this.addCommand({
-			id: "pull-current-file",
-			name: "Pull current file from journal",
-			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				const canRun = file instanceof TFile && file.extension === "md";
-				if (checking) {
-					return canRun;
-				}
-				if (canRun && file) {
-					void this.pullFile(file);
-				}
-				return true;
-			},
-		});
-	}
-
 	private registerVaultEvents() {
-		this.registerEvent(this.app.vault.on("create", (file) => this.queueAutomaticPush(file)));
-		this.registerEvent(this.app.vault.on("modify", (file) => this.queueAutomaticPush(file)));
+		this.registerEvent(this.app.vault.on("create", (file) => this.handleCreateOrModify(file)));
+		this.registerEvent(this.app.vault.on("modify", (file) => this.handleCreateOrModify(file)));
 		this.registerEvent(this.app.vault.on("delete", (file) => this.handleDelete(file)));
 		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleRename(file, oldPath)));
-		this.registerEvent(this.app.metadataCache.on("changed", (file) => this.queueAutomaticPush(file)));
+		this.registerEvent(this.app.metadataCache.on("changed", (file) => this.handleCreateOrModify(file)));
+	}
+
+	private handleCreateOrModify(file: TAbstractFile) {
+		if (file instanceof TFile && file.extension === "md" && !this.isSuppressed(file.path)) {
+			this.recentLocalFileChanges.set(normalizePath(file.path), Date.now());
+		}
+		this.queueAutomaticPush(file);
 	}
 
 	private async registerBridgeEventWatcher() {
-		try {
-			await this.prepareBridgeDirectories();
-			this.bridgeEventWatcher?.close();
-			const watcher = watch(this.eventsDir(), { persistent: false }, () => {
-				void this.drainBridgeEvents();
-			});
-			this.bridgeEventWatcher = watcher;
-			this.register(() => watcher.close());
-			void this.drainBridgeEvents();
-		} catch (error) {
-			this.reportError("Markway event watcher failed", error);
-		}
-	}
-
-	private async drainBridgeEvents() {
-		if (this.drainingBridgeEvents) {
-			return;
-		}
-
-		this.drainingBridgeEvents = true;
-		try {
-			const names = await readdir(this.eventsDir()).catch(() => []);
-			let sawJournalChange = false;
-			for (const name of names) {
-				if (!name.endsWith(".json")) {
-					continue;
-				}
-
-				const eventPath = join(this.eventsDir(), name);
-				try {
-					const event = JSON.parse(await readFile(eventPath, "utf8")) as BridgeEvent;
-					if (event.kind === "journalChanged") {
-						sawJournalChange = true;
-					}
-				} catch (error) {
-					console.debug("Could not read Markway bridge event", eventPath, error);
-				} finally {
-					await rm(eventPath, { force: true });
-				}
-			}
-
-			if (sawJournalChange) {
-				this.queueAutomaticJournalPull();
-			}
-		} finally {
-			this.drainingBridgeEvents = false;
-		}
+		await this.bridge.registerEventWatcher(() => this.queueAutomaticJournalPull());
 	}
 
 	private queueAutomaticJournalPull() {
@@ -312,7 +190,7 @@ export default class MarkwayPlugin extends Plugin {
 		if (!this.settings.automaticSync || this.isSuppressed(file.path)) {
 			return;
 		}
-		if (!this.fileMatchesJournalRules(file)) {
+		if (!this.linkForFile(file) && !this.fileMatchesJournalRules(file)) {
 			return;
 		}
 
@@ -372,7 +250,7 @@ export default class MarkwayPlugin extends Plugin {
 		})();
 	}
 
-	private async runDoctor() {
+	async runDoctor() {
 		try {
 			const result = await this.sendBridgeRequest({ kind: "doctor" }, 15000);
 			if (!result.ok) {
@@ -385,7 +263,7 @@ export default class MarkwayPlugin extends Plugin {
 		}
 	}
 
-	private async showDiagnostics() {
+	async showDiagnostics() {
 		const lines = [
 			`vault: ${this.safeValue(() => this.vaultPath())}`,
 			`bridge: ${this.safeValue(() => this.bridgeRoot())}`,
@@ -400,7 +278,7 @@ export default class MarkwayPlugin extends Plugin {
 		console.debug(message);
 	}
 
-	private async pushFile(file: TFile, options: PushOptions = {}) {
+	async pushFile(file: TFile, options: PushOptions = {}) {
 		this.bridgeRequestsInFlight += 1;
 		try {
 			await this.migrateFrontmatterLink(file);
@@ -408,17 +286,20 @@ export default class MarkwayPlugin extends Plugin {
 			if (options.linkedOnly && !link) {
 				return;
 			}
+			if (link) {
+				await this.syncRemovedMusicAttachments(file, link);
+			}
 
 			const title = titleForFile(file.path);
 			const markdown = await this.app.vault.read(file);
-			const markdownHash = sha256Hex(markdown);
-			if (!options.force && link && link.lastMarkdownHash === markdownHash && link.title === title) {
+			const journalBody = this.bodyForJournalPush(markdown, title);
+			const journalHash = hashJournalContent(title, journalBody);
+			if (!options.force && link && link.lastJournalHash === journalHash && link.title === title) {
 				this.setStatus(`Markway skipped unchanged ${file.path}`);
 				return;
 			}
 
-			const journalBody = this.bodyForJournalPush(markdown, title);
-			const journalHash = hashJournalContent(title, journalBody);
+			const markdownHash = sha256Hex(markdown);
 			const result = await this.sendBridgeRequest({
 				kind: "journalPush",
 				relativePath: file.path,
@@ -437,11 +318,14 @@ export default class MarkwayPlugin extends Plugin {
 				lastSyncedAt: new Date().toISOString(),
 				lastMarkdownHash: markdownHash,
 				lastJournalHash: journalHash,
-					lastJournalUpdated: "",
-					lastTemplateHash: link?.lastTemplateHash ?? "",
-					lastTemplateSettingsHash: link?.lastTemplateSettingsHash ?? "",
-					lastTemplatePropertyKeys: link?.lastTemplatePropertyKeys ?? [],
-				};
+				lastJournalUpdated: "",
+				lastTemplateHash: link?.lastTemplateHash ?? "",
+				lastTemplateSettingsHash: link?.lastTemplateSettingsHash ?? "",
+				lastTemplatePropertyKeys: link?.lastTemplatePropertyKeys ?? [],
+				lastTemplateProperties: link?.lastTemplateProperties ?? {},
+				lastMusicPropertyItems: link?.lastMusicPropertyItems ?? {},
+			};
+			this.recentLocalFileChanges.delete(normalizePath(file.path));
 			await this.savePluginData();
 
 			this.setStatus(`Markway pushed ${file.path}`);
@@ -459,7 +343,7 @@ export default class MarkwayPlugin extends Plugin {
 		}
 	}
 
-	private async pullFile(file: TFile) {
+	async pullFile(file: TFile) {
 		try {
 			await this.migrateFrontmatterLink(file);
 			const link = this.linkForFile(file);
@@ -476,7 +360,7 @@ export default class MarkwayPlugin extends Plugin {
 		}
 	}
 
-	private async syncJournal(options: SyncOptions) {
+	async syncJournal(options: SyncOptions) {
 		if (this.journalSyncInProgress) {
 			this.queuedJournalSync = mergeSyncOptions(this.queuedJournalSync, options);
 			return;
@@ -509,18 +393,7 @@ export default class MarkwayPlugin extends Plugin {
 					continue;
 				}
 				if (existing && await this.hasUnsyncedLocalChanges(existing)) {
-					const file = this.fileForPath(existing.path);
-					if (file && this.needsTemplateRefresh(existing)) {
-						const entry = await this.getJournalEntry(summary.id);
-						const templateState = await this.applyJournalTemplateProperties(file, entry);
-						existing.lastTemplateHash = templateState.hash;
-						existing.lastTemplateSettingsHash = templateState.settingsHash;
-						existing.lastTemplatePropertyKeys = templateState.propertyKeys;
-						existing.lastSyncedAt = new Date().toISOString();
-					}
-					if (file && this.settings.automaticSync && this.fileMatchesJournalRules(file)) {
-						this.queueAutomaticPush(file);
-					}
+					this.queuePushForLink(existing);
 					skipped += 1;
 					continue;
 				}
@@ -538,6 +411,12 @@ export default class MarkwayPlugin extends Plugin {
 						skipped += 1;
 						continue;
 					}
+				}
+
+				if (existing && await this.hasUnsyncedLocalChanges(existing)) {
+					this.queuePushForLink(existing);
+					skipped += 1;
+					continue;
 				}
 
 				await this.writeJournalEntryToVault(entry, existing, reservedPaths, summary.updated);
@@ -604,20 +483,22 @@ export default class MarkwayPlugin extends Plugin {
 
 		reservedPaths?.add(vaultPathKey(file.path));
 
-			const templateState = await this.applyJournalTemplateProperties(file, entry);
-			const markdownHash = sha256Hex(await this.app.vault.read(file));
-			this.journalLinks[entry.id] = {
+		const templateState = await this.applyJournalTemplateProperties(file, entry);
+		const markdownHash = sha256Hex(await this.app.vault.read(file));
+		this.journalLinks[entry.id] = {
 			journalID: entry.id,
 			path: file.path,
 			title: entry.title,
 			lastSyncedAt: new Date().toISOString(),
 			lastMarkdownHash: markdownHash,
 			lastJournalHash: hashJournalContent(entry.title, entry.body),
-				lastJournalUpdated: entry.updated || summaryUpdated || "",
-				lastTemplateHash: templateState.hash,
-				lastTemplateSettingsHash: templateState.settingsHash,
-				lastTemplatePropertyKeys: templateState.propertyKeys,
-			};
+			lastJournalUpdated: entry.updated || summaryUpdated || "",
+			lastTemplateHash: templateState.hash,
+			lastTemplateSettingsHash: templateState.settingsHash,
+			lastTemplatePropertyKeys: templateState.propertyKeys,
+			lastTemplateProperties: templateState.properties,
+			lastMusicPropertyItems: templateState.musicPropertyItems,
+		};
 	}
 
 	private needsTemplateRefresh(link: JournalLink): boolean {
@@ -632,7 +513,13 @@ export default class MarkwayPlugin extends Plugin {
 	private async applyJournalTemplateProperties(
 		file: TFile,
 		entry: JournalEntryText
-	): Promise<{ hash: string; settingsHash: string; propertyKeys: string[] }> {
+	): Promise<{
+		hash: string;
+		settingsHash: string;
+		propertyKeys: string[];
+		properties: Record<string, unknown>;
+		musicPropertyItems: JournalLink["lastMusicPropertyItems"];
+	}> {
 		const rendered = renderJournalTemplateProperties(entry, this.settings);
 		const propertyKeys = Object.keys(rendered.properties);
 		this.suppressFile(file.path);
@@ -647,6 +534,8 @@ export default class MarkwayPlugin extends Plugin {
 			hash: rendered.hash,
 			settingsHash: journalTemplateSettingsHash(this.settings),
 			propertyKeys,
+			properties: rendered.properties,
+			musicPropertyItems: rendered.musicPropertyItems,
 		};
 	}
 
@@ -656,8 +545,40 @@ export default class MarkwayPlugin extends Plugin {
 			return false;
 		}
 
+		if (this.syncTimers.has(file.path) || this.isRecentlyLocallyChanged(file.path)) {
+			return true;
+		}
+
 		const markdown = await this.app.vault.read(file);
-		return link.lastMarkdownHash !== "" && sha256Hex(markdown) !== link.lastMarkdownHash;
+		const title = titleForFile(file.path);
+		return hasUnsyncedMarkdownContent(link, markdown, title, this.bodyForJournalPush(markdown, title));
+	}
+
+	private queuePushForLink(link: JournalLink) {
+		if (!this.settings.automaticSync) {
+			return;
+		}
+
+		const file = this.fileForPath(link.path);
+		if (file) {
+			this.queueAutomaticPush(file);
+		}
+	}
+
+	private isRecentlyLocallyChanged(path: string): boolean {
+		const normalized = normalizePath(path);
+		const changedAt = this.recentLocalFileChanges.get(normalized);
+		if (!changedAt) {
+			return false;
+		}
+
+		const protectionWindow = Math.max(10_000, this.settings.debounceMs * 8);
+		if (Date.now() - changedAt > protectionWindow) {
+			this.recentLocalFileChanges.delete(normalized);
+			return false;
+		}
+
+		return true;
 	}
 
 	private bodyForJournalPush(markdown: string, title: string): string {
@@ -665,6 +586,48 @@ export default class MarkwayPlugin extends Plugin {
 		return this.settings.journalIncludeTitleHeading
 			? stripGeneratedTitleHeading(body, title)
 			: body;
+	}
+
+	private async syncRemovedMusicAttachments(file: TFile, link: JournalLink): Promise<void> {
+		const activeMusicKeys = new Set(
+			this.settings.journalProperties
+				.filter((property) => property.key.trim() && property.value.includes("{{music"))
+				.map((property) => property.key.trim())
+		);
+		if (activeMusicKeys.size === 0) {
+			return;
+		}
+
+		const frontmatter = this.frontmatterForFile(file);
+		const assetIDs = new Set<string>();
+		for (const [propertyKey, previousItems] of Object.entries(link.lastMusicPropertyItems)) {
+			if (!activeMusicKeys.has(propertyKey) || !Object.prototype.hasOwnProperty.call(frontmatter, propertyKey)) {
+				continue;
+			}
+			for (const assetID of removedGeneratedMusicAttachmentIDs(previousItems, frontmatter[propertyKey])) {
+				assetIDs.add(assetID);
+			}
+		}
+
+		if (assetIDs.size === 0) {
+			return;
+		}
+
+		for (const assetID of assetIDs) {
+			await this.deleteJournalAttachment(link.journalID, assetID, { silent: true });
+		}
+
+		const entry = await this.getJournalEntry(link.journalID);
+		const templateState = await this.applyJournalTemplateProperties(file, entry);
+		link.lastTemplateHash = templateState.hash;
+		link.lastTemplateSettingsHash = templateState.settingsHash;
+		link.lastTemplatePropertyKeys = templateState.propertyKeys;
+		link.lastTemplateProperties = templateState.properties;
+		link.lastMusicPropertyItems = templateState.musicPropertyItems;
+		link.lastJournalHash = hashJournalContent(entry.title, entry.body);
+		link.lastJournalUpdated = entry.updated || link.lastJournalUpdated;
+		link.lastSyncedAt = new Date().toISOString();
+		await this.savePluginData();
 	}
 
 	private async renameFileSafely(file: TFile, targetPath: string): Promise<TFile | null> {
@@ -807,11 +770,13 @@ export default class MarkwayPlugin extends Plugin {
 			lastSyncedAt: new Date().toISOString(),
 			lastMarkdownHash: sha256Hex(markdown),
 			lastJournalHash: hashJournalContent(title, this.bodyForJournalPush(markdown, title)),
-				lastJournalUpdated: "",
-				lastTemplateHash: "",
-				lastTemplateSettingsHash: "",
-				lastTemplatePropertyKeys: [],
-			};
+			lastJournalUpdated: "",
+			lastTemplateHash: "",
+			lastTemplateSettingsHash: "",
+			lastTemplatePropertyKeys: [],
+			lastTemplateProperties: {},
+			lastMusicPropertyItems: {},
+		};
 
 		this.suppressFile(file.path);
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
@@ -880,6 +845,25 @@ export default class MarkwayPlugin extends Plugin {
 		}
 	}
 
+	private async deleteJournalAttachment(
+		journalID: string,
+		assetID: string,
+		options: { silent?: boolean } = {}
+	) {
+		const result = await this.sendBridgeRequest({
+			kind: "journalDeleteAttachment",
+			journalID,
+			assetID,
+		}, 60_000);
+		if (!result.ok) {
+			throw new Error(result.message || `Markway app could not delete Journal attachment ${assetID}.`);
+		}
+		this.setStatus(`Markway deleted Journal attachment ${assetID}`);
+		if (!options.silent) {
+			new Notice("Deleted journal attachment");
+		}
+	}
+
 	private async deleteMarkdownFileForJournalLink(link: JournalLink) {
 		const file = this.fileForPath(link.path);
 		if (!file) {
@@ -895,60 +879,7 @@ export default class MarkwayPlugin extends Plugin {
 		request: Omit<BridgeRequest, "id" | "requestedAt">,
 		timeoutMs = 60_000
 	): Promise<BridgeResponse> {
-		const id = randomUUID().toUpperCase();
-		const fullRequest: BridgeRequest = {
-			id,
-			requestedAt: new Date().toISOString(),
-			...request,
-		};
-		this.bridgeRequestsInFlight += 1;
-		try {
-			await this.prepareBridgeDirectories();
-
-			const requestPath = join(this.requestsDir(), `${id}.json`);
-			const temporaryPath = `${requestPath}.${id}.tmp`;
-			await writeFile(temporaryPath, JSON.stringify(fullRequest, null, 2), {
-				encoding: "utf8",
-				mode: 0o600,
-			});
-			await chmod(temporaryPath, 0o600);
-			await rename(temporaryPath, requestPath);
-
-			this.setStatus(`Markway request queued: ${request.kind}`);
-			return await this.waitForBridgeResponse(id, timeoutMs);
-		} finally {
-			this.bridgeRequestsInFlight = Math.max(0, this.bridgeRequestsInFlight - 1);
-		}
-	}
-
-	private async waitForBridgeResponse(id: string, timeoutMs: number): Promise<BridgeResponse> {
-		const responsePath = join(this.responsesDir(), `${id}.json`);
-		const started = Date.now();
-		while (Date.now() - started < timeoutMs) {
-			if (existsSync(responsePath)) {
-				const text = await readFile(responsePath, "utf8");
-				await rm(responsePath, { force: true });
-				return JSON.parse(text) as BridgeResponse;
-			}
-			await sleep(350);
-		}
-
-		throw new Error(
-			"Timed out waiting for Markway.app. Open Markway, set this vault path, and start the bridge."
-		);
-	}
-
-	private async prepareBridgeDirectories() {
-		for (const dir of [
-			this.bridgeBaseDir(),
-			this.bridgeRoot(),
-			this.requestsDir(),
-			this.responsesDir(),
-			this.eventsDir(),
-		]) {
-			await mkdir(dir, { recursive: true, mode: 0o700 });
-			await chmod(dir, 0o700);
-		}
+		return await this.bridge.sendRequest(request, timeoutMs);
 	}
 
 	private async ensureFolder(folderPath: string) {
@@ -995,24 +926,20 @@ export default class MarkwayPlugin extends Plugin {
 		throw new Error("Markway needs a local desktop vault path.");
 	}
 
-	private bridgeBaseDir(): string {
-		return join(homedir(), "Library", "Application Support", "Markway", "Bridge");
-	}
-
 	private bridgeRoot(): string {
-		return join(this.bridgeBaseDir(), sha256Hex(this.vaultPath()));
+		return this.bridge.bridgeRoot();
 	}
 
 	private requestsDir(): string {
-		return join(this.bridgeRoot(), "requests");
+		return this.bridge.requestsDir();
 	}
 
 	private responsesDir(): string {
-		return join(this.bridgeRoot(), "responses");
+		return this.bridge.responsesDir();
 	}
 
 	private eventsDir(): string {
-		return join(this.bridgeRoot(), "events");
+		return this.bridge.eventsDir();
 	}
 
 	private linkForFile(file: TFile): JournalLink | null {
@@ -1037,6 +964,11 @@ export default class MarkwayPlugin extends Plugin {
 			| FrontmatterRecord
 			| undefined;
 		return checkRules(this.app, this.settings.journalRules, file, frontmatter);
+	}
+
+	private frontmatterForFile(file: TFile): Record<string, unknown> {
+		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+		return isRecord(frontmatter) ? frontmatter : {};
 	}
 
 	private fileForPath(path: string): TFile | null {
@@ -1085,307 +1017,4 @@ export default class MarkwayPlugin extends Plugin {
 			return describeUnknown(error);
 		}
 	}
-}
-
-class MarkwaySettingTab extends PluginSettingTab {
-	constructor(private plugin: MarkwayPlugin) {
-		super(plugin.app, plugin);
-	}
-
-	getSettingDefinitions(): SettingDefinitionItem<MarkwaySettingKey>[] {
-		if (!requireApiVersion("1.13.0")) {
-			return [];
-		}
-
-		return [
-			{
-				type: "page",
-				name: "General",
-				desc: "Sync behavior and vault connection.",
-				items: [
-					{
-						name: "Automatic sync",
-						desc: "Sync linked files after edits.",
-						control: {
-							type: "toggle",
-							key: "automaticSync",
-							defaultValue: true,
-						},
-					},
-					{
-						name: "Debounce",
-						desc: "Milliseconds to wait before an automatic push.",
-						control: {
-							type: "number",
-							key: "debounceMs",
-							defaultValue: DEFAULT_SETTINGS.debounceMs,
-							min: 250,
-							step: 50,
-							validate: validateDebounceValue,
-						},
-					},
-					{
-						name: "Vault path override",
-						desc: "Only needed if Obsidian cannot expose the local vault path.",
-						control: {
-							type: "text",
-							key: "vaultPathOverride",
-							placeholder: "/path/to/vault",
-						},
-					},
-				],
-			},
-			{
-				type: "page",
-				name: "Journal",
-				desc: "Apple Journal sync options.",
-				items: [
-					{
-						name: "Journal folder",
-						desc: "Folder to use when importing Journal entries that are not already linked.",
-						control: {
-							type: "text",
-							key: "journalFolder",
-							placeholder: "Journal",
-						},
-					},
-					{
-						name: "Rules",
-						desc: "Choose which markdown files are automatically synced to journal",
-						render: (setting) => {
-							setting.settingEl.addClass("mw-rules-setting");
-							setting.controlEl.empty();
-							const rulesEl = setting.controlEl.createDiv({ cls: "mw-rules-settings-section" });
-							renderJournalRules(
-								rulesEl,
-								this.plugin.app,
-								this.plugin.settings.journalRules,
-								async () => {
-									await this.plugin.savePluginData();
-								},
-								() => {
-									this.update();
-								},
-								this.plugin.journalImportFolder()
-							);
-						},
-					},
-					{
-						name: "Delete Journal entries",
-						desc: "When a synced Markdown file is deleted, also delete its Apple Journal entry.",
-						control: {
-							type: "toggle",
-							key: "deleteJournalEntryWhenFileDeleted",
-							defaultValue: false,
-						},
-					},
-					{
-						name: "Delete Markdown files",
-						desc: "When a synced Apple Journal entry is deleted, also delete its Markdown file.",
-						control: {
-							type: "toggle",
-							key: "deleteMarkdownFileWhenJournalDeleted",
-							defaultValue: false,
-						},
-					},
-					{
-						type: "list",
-						heading: "Properties",
-						emptyState: "No properties added yet.",
-						addItem: {
-							name: "Add property",
-							action: () => {
-								this.plugin.settings.journalProperties.push({
-									id: `property-${Date.now().toString(36)}`,
-									key: "",
-									value: "{{title}}",
-								});
-								void this.plugin.savePluginData();
-								this.plugin.queueTemplateRefresh();
-								this.update();
-							},
-						},
-						onReorder: (oldIndex, newIndex) => {
-							void (async () => {
-								const properties = this.plugin.settings.journalProperties;
-								const [moved] = properties.splice(oldIndex, 1);
-								if (!moved) {
-									return;
-								}
-									properties.splice(newIndex, 0, moved);
-									await this.plugin.savePluginData();
-									this.plugin.queueTemplateRefresh();
-									this.update();
-								})();
-							},
-						onDelete: (index) => {
-								void (async () => {
-									this.plugin.settings.journalProperties.splice(index, 1);
-									await this.plugin.savePluginData();
-									this.plugin.queueTemplateRefresh();
-									this.update();
-								})();
-							},
-						items: this.plugin.settings.journalProperties.map((property) => ({
-							name: property.key || "Property",
-							searchable: false,
-							render: (setting) => {
-								renderJournalTemplatePropertyRow(
-									setting,
-									this.plugin,
-									property,
-									() => {
-										this.update();
-									},
-									() => {
-										this.plugin.queueTemplateRefresh();
-									}
-								);
-							},
-						})),
-					},
-				],
-			},
-		];
-	}
-
-	getControlValue(key: string): unknown {
-		return this.plugin.settings[key as MarkwaySettingKey];
-	}
-
-	async setControlValue(key: string, value: unknown) {
-		switch (key as MarkwaySettingKey) {
-			case "automaticSync":
-				this.plugin.settings.automaticSync = value === true;
-				break;
-			case "debounceMs":
-				this.plugin.settings.debounceMs = normalizeDebounceMs(value);
-				break;
-			case "vaultPathOverride":
-				this.plugin.settings.vaultPathOverride = typeof value === "string" ? value.trim() : "";
-				break;
-			case "journalFolder":
-				this.plugin.settings.journalFolder = typeof value === "string" ? normalizeFolder(value) : "";
-				break;
-			case "deleteJournalEntryWhenFileDeleted":
-				this.plugin.settings.deleteJournalEntryWhenFileDeleted = value === true;
-				break;
-			case "deleteMarkdownFileWhenJournalDeleted":
-				this.plugin.settings.deleteMarkdownFileWhenJournalDeleted = value === true;
-				break;
-		}
-		await this.plugin.savePluginData();
-	}
-
-	// Kept for Obsidian versions before declarative settings.
-	display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
-
-		new Setting(containerEl).setName("Sync behavior").setHeading();
-		new Setting(containerEl)
-			.setName("Automatic sync")
-			.setDesc("Sync linked files after edits.")
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.automaticSync)
-					.onChange(async (value) => {
-						this.plugin.settings.automaticSync = value;
-						await this.plugin.savePluginData();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Debounce")
-			.setDesc("Milliseconds to wait before an automatic push.")
-			.addText((text) =>
-				text
-					.setPlaceholder(String(DEFAULT_SETTINGS.debounceMs))
-					.setValue(String(this.plugin.settings.debounceMs))
-					.onChange(async (value) => {
-						this.plugin.settings.debounceMs = normalizeDebounceMs(value);
-						await this.plugin.savePluginData();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Vault path override")
-			.setDesc("Only needed if Obsidian cannot expose the local vault path.")
-			.addText((text) =>
-				text
-					.setPlaceholder("/path/to/vault")
-					.setValue(this.plugin.settings.vaultPathOverride)
-					.onChange(async (value) => {
-						this.plugin.settings.vaultPathOverride = value.trim();
-						await this.plugin.savePluginData();
-					})
-			);
-
-		new Setting(containerEl).setName("Journal").setHeading();
-		renderJournalSettings(containerEl, this.plugin, () => {
-			// eslint-disable-next-line @typescript-eslint/no-deprecated
-			this.display();
-		});
-	}
-}
-
-function renderJournalSettings(containerEl: HTMLElement, plugin: MarkwayPlugin, onRefresh: () => void): void {
-	new Setting(containerEl)
-		.setName("Journal folder")
-		.setDesc("Folder to use when importing journal entries that are not already linked.")
-		.addText((text) =>
-			text
-				.setPlaceholder("Journal")
-				.setValue(plugin.settings.journalFolder)
-				.onChange(async (value) => {
-					plugin.settings.journalFolder = normalizeFolder(value);
-					await plugin.savePluginData();
-				})
-		);
-
-	new Setting(containerEl)
-		.setName("Rules")
-		.setDesc("Choose which Markdown files are automatically synced to journal.")
-		.setHeading();
-
-	const rulesEl = containerEl.createDiv({ cls: "mw-rules-settings-section" });
-	renderJournalRules(
-		rulesEl,
-		plugin.app,
-		plugin.settings.journalRules,
-		async () => {
-			await plugin.savePluginData();
-		},
-		onRefresh,
-		plugin.journalImportFolder()
-	);
-
-	new Setting(containerEl)
-		.setName("Delete journal entries")
-		.setDesc("When a synced vault file is deleted, also delete its journal entry.")
-		.addToggle((toggle) =>
-			toggle
-				.setValue(plugin.settings.deleteJournalEntryWhenFileDeleted)
-				.onChange(async (value) => {
-					plugin.settings.deleteJournalEntryWhenFileDeleted = value;
-					await plugin.savePluginData();
-				})
-		);
-
-	new Setting(containerEl)
-		.setName("Delete vault files")
-		.setDesc("When a synced journal entry is deleted, also move its vault file to trash.")
-		.addToggle((toggle) =>
-			toggle
-				.setValue(plugin.settings.deleteMarkdownFileWhenJournalDeleted)
-				.onChange(async (value) => {
-					plugin.settings.deleteMarkdownFileWhenJournalDeleted = value;
-					await plugin.savePluginData();
-				})
-		);
-
-	new Setting(containerEl).setName("Content").setHeading();
-	renderJournalTemplateSettings(containerEl, plugin, onRefresh, () => {
-		plugin.queueTemplateRefresh();
-	});
 }

@@ -61,6 +61,16 @@ describe("journal templates", () => {
 			"[[Sahiba / (Original Motion Picture Soundtrack)]]",
 			"[[How do you know]]",
 		]);
+		expect(rendered.musicPropertyItems.music).toEqual([
+			{
+				id: "134D4F26-4E2C-414D-8F6F-C0D4274E7F66",
+				value: "[[Sahiba / (Original Motion Picture Soundtrack)]]",
+			},
+			{
+				id: "3E161BEF-A5EF-4BFF-A229-0D7E2AF315E5",
+				value: "[[How do you know]]",
+			},
+		]);
 	});
 
 	it("renders the provided map replace wikilink example", () => {

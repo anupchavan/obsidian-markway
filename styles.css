@@ -60,7 +60,7 @@
 
 .mw-template-property-row {
 	display: grid;
-	grid-template-columns: 24px minmax(8rem, 12rem) minmax(0, 1fr) 32px;
+	grid-template-columns: 24px minmax(8rem, 12rem) minmax(0, 1fr);
 	align-items: center;
 	gap: var(--size-2-2);
 	width: 100%;

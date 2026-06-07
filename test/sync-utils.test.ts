@@ -6,8 +6,11 @@ import {
 	defaultMarkwaySettings,
 	describeUnknown,
 	explainMarkwayError,
+	frontmatterComparableValues,
 	hashJournalContent,
+	hasMarkdownChangedSinceLastSync,
 	hasMatchingJournalSummary,
+	hasUnsyncedMarkdownContent,
 	isFileExistsError,
 	mergeSyncOptions,
 	normalizeDebounceMs,
@@ -19,6 +22,7 @@ import {
 	readJournalLinks,
 	readPluginData,
 	readSettings,
+	removedGeneratedMusicAttachmentIDs,
 	sameVaultPath,
 	sanitizeFileName,
 	sha256Hex,
@@ -172,6 +176,8 @@ describe("journal links", () => {
 			lastTemplateHash: "",
 			lastTemplateSettingsHash: "",
 			lastTemplatePropertyKeys: [],
+			lastTemplateProperties: {},
+			lastMusicPropertyItems: {},
 		});
 	});
 
@@ -190,10 +196,12 @@ describe("journal links", () => {
 				lastMarkdownHash: "",
 				lastJournalHash: "",
 				lastJournalUpdated: "u",
-				lastTemplateHash: "",
-				lastTemplateSettingsHash: "",
-				lastTemplatePropertyKeys: [],
-			},
+					lastTemplateHash: "",
+					lastTemplateSettingsHash: "",
+					lastTemplatePropertyKeys: [],
+					lastTemplateProperties: {},
+					lastMusicPropertyItems: {},
+				},
 			{ id: "A", status: "active", created: "", updated: "u", title: "Title" }
 		)).toBe(true);
 	});
@@ -208,10 +216,12 @@ describe("journal links", () => {
 				lastMarkdownHash: "",
 				lastJournalHash: "",
 				lastJournalUpdated: "",
-				lastTemplateHash: "",
-				lastTemplateSettingsHash: "",
-				lastTemplatePropertyKeys: [],
-			},
+					lastTemplateHash: "",
+					lastTemplateSettingsHash: "",
+					lastTemplatePropertyKeys: [],
+					lastTemplateProperties: {},
+					lastMusicPropertyItems: {},
+				},
 			{ id: "A", status: "active", created: "", title: "Title" }
 		)).toBe(false);
 	});
@@ -320,6 +330,14 @@ describe("markdown structure preservation", () => {
 	it("leaves new notes untouched when there is no existing structure", () => {
 		expect(preserveMarkdownStructure("", "**bold**\n\nPlain")).toBe("**bold**\n\nPlain");
 	});
+
+	it("does not preserve stale extra trailing blank lines from the existing note", () => {
+		expect(preserveMarkdownStructure("Body\n\n\n\n\n", "Body\n")).toBe("Body\n");
+	});
+
+	it("preserves trailing blank lines when they are present in the journal body", () => {
+		expect(preserveMarkdownStructure("Body\n", "Body\n\n\n")).toBe("Body\n\n\n");
+	});
 });
 
 describe("paths and file names", () => {
@@ -376,7 +394,116 @@ describe("paths and file names", () => {
 	});
 });
 
+describe("generated attachment frontmatter", () => {
+	const generated = [
+		{ id: "A", value: "[[Sahiba]]" },
+		{ id: "B", value: "[[How do you know]]" },
+		{ id: "C", value: "[[Cornfield Chase]]" },
+	];
+
+	it("normalizes scalar and array frontmatter values for comparisons", () => {
+		expect(frontmatterComparableValues("[[Sahiba]]")).toEqual(["[[Sahiba]]"]);
+		expect(frontmatterComparableValues([" [[Sahiba]] ", "[[Cornfield Chase]]"])).toEqual([
+			"[[Sahiba]]",
+			"[[Cornfield Chase]]",
+		]);
+	});
+
+	it("detects a simple removal from generated music frontmatter", () => {
+		expect(removedGeneratedMusicAttachmentIDs(generated, ["[[Sahiba]]", "[[Cornfield Chase]]"])).toEqual(["B"]);
+	});
+
+	it("does not delete when a generated music item is edited in place", () => {
+		expect(removedGeneratedMusicAttachmentIDs(generated, [
+			"[[Sahiba]]",
+			"[[How do you know - alternate name]]",
+			"[[Cornfield Chase]]",
+		])).toEqual([]);
+	});
+
+	it("does not delete when a new music-looking value is added", () => {
+		expect(removedGeneratedMusicAttachmentIDs(generated, [
+			"[[Sahiba]]",
+			"[[How do you know]]",
+			"[[Cornfield Chase]]",
+			"[[New song]]",
+		])).toEqual([]);
+	});
+
+	it("does not delete when removal is mixed with an edit", () => {
+		expect(removedGeneratedMusicAttachmentIDs(generated, ["[[Sahiba alt]]", "[[Cornfield Chase]]"])).toEqual([]);
+	});
+
+	it("does not delete ambiguous duplicate generated values", () => {
+		expect(removedGeneratedMusicAttachmentIDs([
+			{ id: "A", value: "[[Same]]" },
+			{ id: "B", value: "[[Same]]" },
+		], ["[[Same]]"])).toEqual([]);
+	});
+});
+
 describe("sync decisions and errors", () => {
+	function linkWithMarkdownHash(lastMarkdownHash: string) {
+		return {
+			journalID: "A",
+			path: "Journal/A.md",
+			title: "A",
+			lastSyncedAt: "",
+			lastMarkdownHash,
+			lastJournalHash: "",
+			lastJournalUpdated: "",
+			lastTemplateHash: "",
+			lastTemplateSettingsHash: "",
+			lastTemplatePropertyKeys: [],
+			lastTemplateProperties: {},
+			lastMusicPropertyItems: {},
+		};
+	}
+
+	it("treats a changed markdown hash as local work that automatic pull must not overwrite", () => {
+		expect(hasMarkdownChangedSinceLastSync(
+			linkWithMarkdownHash(sha256Hex("old")),
+			"new"
+		)).toBe(true);
+	});
+
+	it("does not mark markdown changed when the saved hash still matches", () => {
+		expect(hasMarkdownChangedSinceLastSync(
+			linkWithMarkdownHash(sha256Hex("same")),
+			"same"
+		)).toBe(false);
+	});
+
+	it("does not block old links that never recorded a markdown hash", () => {
+		expect(hasMarkdownChangedSinceLastSync(linkWithMarkdownHash(""), "body")).toBe(false);
+	});
+
+	it("trusts a matching markdown hash even when preserved markdown differs from Journal plain text", () => {
+		const markdown = "## boka\n\n```js\nok = doki\n```\n";
+		const link = {
+			...linkWithMarkdownHash(sha256Hex(markdown)),
+			lastJournalHash: hashJournalContent("Into the night", "boka\n\nok = doki\n"),
+		};
+
+		expect(hasUnsyncedMarkdownContent(
+			link,
+			markdown,
+			"Into the night",
+			markdown
+		)).toBe(false);
+	});
+
+	it("uses Journal hashes for legacy links without a markdown hash", () => {
+		const markdown = "Changed";
+		const title = "Entry";
+		const link = {
+			...linkWithMarkdownHash(""),
+			lastJournalHash: hashJournalContent(title, "Previous"),
+		};
+
+		expect(hasUnsyncedMarkdownContent(link, markdown, title, markdown)).toBe(true);
+	});
+
 	it("merges sync options when no existing options are queued", () => {
 		expect(mergeSyncOptions(null, { includeNew: true })).toEqual({ includeNew: true });
 	});
