@@ -19,6 +19,10 @@ interface SuggestItem {
 	matchResult?: SearchResult;
 }
 
+interface SuggestElementHost {
+	suggestEl?: HTMLElement;
+}
+
 abstract class BaseSuggest extends AbstractInputSuggest<SuggestItem> {
 	protected onSelectCallback: ((value: string) => void) | null = null;
 	protected excludeValues: string[] = [];
@@ -26,9 +30,7 @@ abstract class BaseSuggest extends AbstractInputSuggest<SuggestItem> {
 	constructor(app: App, inputEl: HTMLInputElement | HTMLDivElement) {
 		super(app, inputEl);
 		this.limit = 50;
-		// Obsidian keeps this private; Custom Views uses it for native property-value styling.
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-		(this as any).suggestEl?.addClass("mod-property-value");
+		this.suggestElement()?.addClass("mod-property-value");
 	}
 
 	setExcludeValues(values: string[]): this {
@@ -42,14 +44,17 @@ abstract class BaseSuggest extends AbstractInputSuggest<SuggestItem> {
 	}
 
 	selectHighlighted(): boolean {
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
-		const suggestEl = (this as any).suggestEl as HTMLElement | undefined;
+		const suggestEl = this.suggestElement();
 		const selected = suggestEl?.querySelector(".suggestion-item.is-selected") as HTMLElement | null;
 		if (!selected) {
 			return false;
 		}
 		selected.click();
 		return true;
+	}
+
+	private suggestElement(): HTMLElement | undefined {
+		return (this as unknown as SuggestElementHost).suggestEl;
 	}
 
 	selectSuggestion(item: SuggestItem, _event: MouseEvent | KeyboardEvent): void {
