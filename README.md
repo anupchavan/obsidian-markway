@@ -8,13 +8,13 @@ It is the Obsidian adapter for the larger Markway project: a gateway between App
 
 The plugin does not need Full Disk Access.
 
-Apple Journal data lives in protected macOS group containers. Instead of asking users to grant Obsidian broad permissions, the plugin communicates with Markway.app through a private local file bridge in:
+Apple Journal data lives in protected macOS group containers. Instead of asking users to grant Obsidian broad permissions, the plugin communicates with Markway.app through a local bridge inside the current vault:
 
 ```text
-~/Library/Application Support/Markway/Bridge/<vault-hash>
+<vault>/.obsidian/plugins/markway/bridge
 ```
 
-Markway.app holds the macOS permissions and performs Journal operations. The plugin does not expose a network socket or grant Obsidian access to Apple's Journal container; bridge files are scoped to the current macOS user and vault hash.
+Markway.app holds the macOS permissions and performs Journal operations. The plugin does not expose a network socket, does not import Node's `fs` module, and does not grant Obsidian access to Apple's Journal container. The plugin writes request files through Obsidian's vault adapter, and Markway.app reads those files from the vault path selected by the user.
 
 ## Requirements
 
@@ -151,8 +151,8 @@ The plugin release workflow is:
 Create a tag:
 
 ```zsh
-git tag v0.1.0
-git push origin v0.1.0
+git tag 0.1.2
+git push origin 0.1.2
 ```
 
 The workflow builds and publishes a draft GitHub release containing:

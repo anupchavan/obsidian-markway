@@ -1,5 +1,4 @@
 import { randomUUID } from "crypto";
-import { existsSync } from "fs";
 import { basename, dirname, extname } from "path";
 import {
 	FileSystemAdapter,
@@ -76,7 +75,8 @@ export default class MarkwayPlugin extends Plugin {
 		this.statusEl = this.addStatusBarItem();
 		this.setStatus("Markway idle");
 		this.bridge = new MarkwayBridgeClient(
-			() => this.vaultPath(),
+			this.app.vault.adapter,
+			this.manifest.id,
 			(text) => this.setStatus(text),
 			(message, error) => this.reportError(message, error),
 			() => {
@@ -264,10 +264,11 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	async showDiagnostics() {
+		const bridgeRequestsExist = await this.safeAsyncValue(async () => String(await this.bridge.requestsExist()));
 		const lines = [
 			`vault: ${this.safeValue(() => this.vaultPath())}`,
 			`bridge: ${this.safeValue(() => this.bridgeRoot())}`,
-			`bridge requests exist: ${this.safeValue(() => String(existsSync(this.requestsDir())))}`,
+			`bridge requests exist: ${bridgeRequestsExist}`,
 			`automatic sync: ${this.settings.automaticSync ? "on" : "off"}`,
 			`journal links: ${Object.keys(this.journalLinks).length}`,
 			`active file: ${this.app.workspace.getActiveFile()?.path ?? "(none)"}`,
@@ -1009,6 +1010,14 @@ export default class MarkwayPlugin extends Plugin {
 	private safeValue(read: () => string): string {
 		try {
 			return read();
+		} catch (error) {
+			return describeUnknown(error);
+		}
+	}
+
+	private async safeAsyncValue(read: () => Promise<string>): Promise<string> {
+		try {
+			return await read();
 		} catch (error) {
 			return describeUnknown(error);
 		}

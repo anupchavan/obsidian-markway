@@ -1,4 +1,3 @@
-import { realpathSync } from "fs";
 import { basename, extname, resolve } from "path";
 
 export function sameVaultPath(left: string, right?: string): boolean {
@@ -43,9 +42,5 @@ export function normalizePath(path: string): string {
 }
 
 export function canonicalPath(path: string): string {
-	try {
-		return realpathSync.native(path);
-	} catch {
-		return resolve(path);
-	}
+	return resolve(path);
 }
