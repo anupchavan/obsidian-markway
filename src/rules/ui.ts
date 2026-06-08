@@ -24,7 +24,6 @@ import {
 	type FilterOperator,
 	type PropertyDef,
 	type PropertyType,
-	type RuleApp,
 } from "../rules";
 
 interface ComboboxItem {
@@ -215,7 +214,7 @@ class JournalRulesBuilder {
 		private readonly onRefresh: () => void,
 		private readonly defaultFolder: string
 	) {
-		this.availableProperties = scanRuleProperties(app as RuleApp);
+			this.availableProperties = scanRuleProperties(app);
 	}
 
 	private get pendingAutoOpen(): PendingAutoOpen {

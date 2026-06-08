@@ -72,17 +72,19 @@ export class MarkwaySettingTab extends PluginSettingTab {
 		await this.plugin.savePluginData();
 	}
 
-	// Kept for Obsidian versions before declarative settings.
-	display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
-		renderLegacyGeneralSettings(containerEl, this.plugin);
-		new Setting(containerEl).setName("Journal").setHeading();
-		renderLegacyJournalSettings(containerEl, this.plugin, () => {
-			// eslint-disable-next-line @typescript-eslint/no-deprecated
-			this.display();
-		});
-	}
+		display(): void {
+			this.renderLegacySettings();
+		}
+
+		private renderLegacySettings(): void {
+			const { containerEl } = this;
+			containerEl.empty();
+			renderLegacyGeneralSettings(containerEl, this.plugin);
+			new Setting(containerEl).setName("Journal").setHeading();
+			renderLegacyJournalSettings(containerEl, this.plugin, () => {
+				this.renderLegacySettings();
+			});
+		}
 
 	private generalItems(): SettingDefinitionItem<MarkwaySettingKey>[] {
 		return [
@@ -162,10 +164,10 @@ export class MarkwaySettingTab extends PluginSettingTab {
 						await this.plugin.savePluginData();
 					},
 					() => {
-						this.update();
-					},
-					this.plugin.journalImportFolder()
-				);
+							this.refreshDeclarativeSettings();
+						},
+						this.plugin.journalImportFolder()
+					);
 			},
 		};
 	}
@@ -183,11 +185,11 @@ export class MarkwaySettingTab extends PluginSettingTab {
 						key: "",
 						value: "{{title}}",
 					});
-					void this.plugin.savePluginData();
-					this.plugin.queueTemplateRefresh();
-					this.update();
+						void this.plugin.savePluginData();
+						this.plugin.queueTemplateRefresh();
+						this.refreshDeclarativeSettings();
+					},
 				},
-			},
 			onReorder: (oldIndex, newIndex) => {
 				void this.reorderProperty(oldIndex, newIndex);
 			},
@@ -201,10 +203,10 @@ export class MarkwaySettingTab extends PluginSettingTab {
 					renderJournalTemplatePropertyRow(
 						setting,
 						this.plugin,
-						property,
-						() => {
-							this.update();
-						},
+							property,
+							() => {
+								this.refreshDeclarativeSettings();
+							},
 						() => {
 							this.plugin.queueTemplateRefresh();
 						}
@@ -221,15 +223,21 @@ export class MarkwaySettingTab extends PluginSettingTab {
 			return;
 		}
 		properties.splice(newIndex, 0, moved);
-		await this.plugin.savePluginData();
-		this.plugin.queueTemplateRefresh();
-		this.update();
-	}
+			await this.plugin.savePluginData();
+			this.plugin.queueTemplateRefresh();
+			this.refreshDeclarativeSettings();
+		}
 
-	private async deleteProperty(index: number): Promise<void> {
-		this.plugin.settings.journalProperties.splice(index, 1);
-		await this.plugin.savePluginData();
-		this.plugin.queueTemplateRefresh();
-		this.update();
+		private async deleteProperty(index: number): Promise<void> {
+			this.plugin.settings.journalProperties.splice(index, 1);
+			await this.plugin.savePluginData();
+			this.plugin.queueTemplateRefresh();
+			this.refreshDeclarativeSettings();
+		}
+
+		private refreshDeclarativeSettings(): void {
+			if (requireApiVersion("1.13.0")) {
+				this.update();
+			}
+		}
 	}
-}

@@ -9,6 +9,16 @@ const obsidianRecommended = Array.from(
 );
 
 export default tseslint.config(
+	globalIgnores([
+		"node_modules",
+		"dist",
+		"esbuild.config.mjs",
+		"version-bump.mjs",
+		"versions.json",
+		"main.js",
+		"package.json",
+		"package-lock.json",
+	]),
 	{
 		languageOptions: {
 			globals: {
@@ -27,12 +37,4 @@ export default tseslint.config(
 		},
 	},
 	...obsidianRecommended,
-	globalIgnores([
-		"node_modules",
-		"dist",
-		"esbuild.config.mjs",
-		"version-bump.mjs",
-		"versions.json",
-		"main.js",
-	]),
 );

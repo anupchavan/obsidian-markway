@@ -8,7 +8,7 @@ import {
 	TAbstractFile,
 	TFile,
 } from "obsidian";
-import { checkRules, firstFolderFromRules, type FrontmatterRecord } from "./rules";
+import { checkRules, firstFolderFromRules } from "./rules";
 import { MarkwayBridgeClient, type BridgeRequest, type BridgeResponse } from "./bridge-client";
 import { registerMarkwayCommands } from "./commands";
 import {
@@ -57,16 +57,16 @@ interface PushOptions {
 }
 
 export default class MarkwayPlugin extends Plugin {
-	settings: MarkwaySettings;
+	settings!: MarkwaySettings;
 	journalLinks: Record<string, JournalLink> = {};
 	private statusEl!: HTMLElement;
 	private bridge!: MarkwayBridgeClient;
 	private bridgeRequestsInFlight = 0;
 	private journalSyncInProgress = false;
 	private queuedJournalSync: SyncOptions | null = null;
-	private journalSyncTimer: ReturnType<typeof setTimeout> | null = null;
-	private templateRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-	private syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private journalSyncTimer: number | null = null;
+	private templateRefreshTimer: number | null = null;
+	private syncTimers = new Map<string, number>();
 	private suppressedFilePaths = new Map<string, number>();
 	private recentLocalFileChanges = new Map<string, number>();
 
@@ -100,15 +100,15 @@ export default class MarkwayPlugin extends Plugin {
 
 	onunload() {
 		for (const timer of this.syncTimers.values()) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 		}
 		this.syncTimers.clear();
 		if (this.journalSyncTimer) {
-			clearTimeout(this.journalSyncTimer);
+			window.clearTimeout(this.journalSyncTimer);
 			this.journalSyncTimer = null;
 		}
 		if (this.templateRefreshTimer) {
-			clearTimeout(this.templateRefreshTimer);
+			window.clearTimeout(this.templateRefreshTimer);
 			this.templateRefreshTimer = null;
 		}
 		this.bridge?.close();
@@ -154,11 +154,11 @@ export default class MarkwayPlugin extends Plugin {
 		}
 
 		if (this.journalSyncTimer) {
-			clearTimeout(this.journalSyncTimer);
+			window.clearTimeout(this.journalSyncTimer);
 		}
 
 		const delay = Math.max(1200, this.settings.debounceMs);
-		this.journalSyncTimer = setTimeout(() => {
+		this.journalSyncTimer = window.setTimeout(() => {
 			this.journalSyncTimer = null;
 			if (this.bridgeRequestsInFlight > 0) {
 				this.queueAutomaticJournalPull();
@@ -174,10 +174,10 @@ export default class MarkwayPlugin extends Plugin {
 		}
 
 		if (this.templateRefreshTimer) {
-			clearTimeout(this.templateRefreshTimer);
+			window.clearTimeout(this.templateRefreshTimer);
 		}
 
-		this.templateRefreshTimer = setTimeout(() => {
+		this.templateRefreshTimer = window.setTimeout(() => {
 			this.templateRefreshTimer = null;
 			void this.syncJournal({ includeNew: false, silent: true });
 		}, Math.max(1200, this.settings.debounceMs));
@@ -196,10 +196,10 @@ export default class MarkwayPlugin extends Plugin {
 
 		const existingTimer = this.syncTimers.get(file.path);
 		if (existingTimer) {
-			clearTimeout(existingTimer);
+			window.clearTimeout(existingTimer);
 		}
 
-		const timer = setTimeout(() => {
+		const timer = window.setTimeout(() => {
 			this.syncTimers.delete(file.path);
 			void this.pushFile(file, { silent: true });
 		}, Math.max(250, this.settings.debounceMs));
@@ -952,17 +952,13 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private frontmatterJournalIDForFile(file: TFile): string | null {
-		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as
-			| Record<string, unknown>
-			| undefined;
-		const value = frontmatter?.["markway.appleJournalID"];
+		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+		const value: unknown = frontmatter?.["markway.appleJournalID"];
 		return typeof value === "string" && value.trim() ? value.trim() : null;
 	}
 
 	private fileMatchesJournalRules(file: TFile): boolean {
-		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as
-			| FrontmatterRecord
-			| undefined;
+		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
 		return checkRules(this.app, this.settings.journalRules, file, frontmatter);
 	}
 
