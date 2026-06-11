@@ -6,7 +6,8 @@ import {
 } from "./paths";
 import { isRecord, stringValue } from "./primitives";
 import type {
-	GeneratedMusicPropertyItem,
+	GeneratedAttachmentPropertyItem,
+	JournalBodySection,
 	JournalLink,
 	JournalTemplateProperty,
 	MarkwayPluginData,
@@ -16,6 +17,7 @@ import type {
 const DEFAULT_DEBOUNCE_MS = 1200;
 
 export const DEFAULT_JOURNAL_FOLDER = "Journal";
+export const DEFAULT_JOURNAL_CONTENT_TEMPLATE = "{{content}}";
 export const DEFAULT_JOURNAL_PROPERTIES: JournalTemplateProperty[] = [
 	{
 		id: "music",
@@ -37,6 +39,8 @@ export function defaultMarkwaySettings(journalFolder = DEFAULT_JOURNAL_FOLDER): 
 		deleteMarkdownFileWhenJournalDeleted: false,
 		journalProperties: cloneJournalProperties(DEFAULT_JOURNAL_PROPERTIES),
 		journalIncludeTitleHeading: false,
+		journalContentTemplate: DEFAULT_JOURNAL_CONTENT_TEMPLATE,
+		journalPhotosProperty: "",
 	};
 }
 
@@ -153,8 +157,26 @@ export function frontmatterComparableValues(value: unknown): string[] {
 	return single ? [single] : [];
 }
 
-export function removedGeneratedMusicAttachmentIDs(
-	previousItems: GeneratedMusicPropertyItem[],
+export function addedFrontmatterValues(
+	previousItems: GeneratedAttachmentPropertyItem[],
+	currentValue: unknown
+): string[] {
+	const currentValues = frontmatterComparableValues(currentValue);
+	const previousCounts = countedValues(previousItems.map((item) => item.value).filter(Boolean));
+	const added: string[] = [];
+	for (const value of currentValues) {
+		const remaining = previousCounts.get(value) ?? 0;
+		if (remaining > 0) {
+			previousCounts.set(value, remaining - 1);
+		} else {
+			added.push(value);
+		}
+	}
+	return added;
+}
+
+export function removedGeneratedAttachmentIDs(
+	previousItems: GeneratedAttachmentPropertyItem[],
 	currentValue: unknown
 ): string[] {
 	const previousValues = previousItems.map((item) => item.value).filter(Boolean);
@@ -199,8 +221,42 @@ function readJournalLink(journalID: string, rawLink: unknown): JournalLink | nul
 		lastTemplateSettingsHash: stringValue(rawLink.lastTemplateSettingsHash) || "",
 		lastTemplatePropertyKeys: stringArrayValue(rawLink.lastTemplatePropertyKeys),
 		lastTemplateProperties: recordValue(rawLink.lastTemplateProperties),
-		lastMusicPropertyItems: readMusicPropertyItems(rawLink.lastMusicPropertyItems),
+		lastAttachmentPropertyItems: readAttachmentPropertyItems(
+			rawLink.lastAttachmentPropertyItems ?? rawLink.lastMusicPropertyItems
+		),
+		// Chrome strings keep significant leading/trailing whitespace, so they
+		// must not go through the trimming stringValue helper.
+		lastContentPrefix: rawStringValue(rawLink.lastContentPrefix),
+		lastContentSuffix: rawStringValue(rawLink.lastContentSuffix),
+		lastBodySections: readBodySections(rawLink.lastBodySections),
+		lastPhotoFiles: stringRecordValue(rawLink.lastPhotoFiles),
 	};
+}
+
+function readBodySections(value: unknown): JournalBodySection[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	const sections: JournalBodySection[] = [];
+	for (const raw of value) {
+		if (!isRecord(raw)) {
+			continue;
+		}
+		const kind = raw.kind === "generated" || raw.kind === "content" ? raw.kind : null;
+		if (!kind) {
+			continue;
+		}
+		sections.push({
+			kind,
+			marker: rawStringValue(raw.marker),
+			text: rawStringValue(raw.text),
+		});
+	}
+	return sections;
+}
+
+function rawStringValue(value: unknown): string {
+	return typeof value === "string" ? value : "";
 }
 
 function readDeleteSettings(value: Record<string, unknown>, settings: Partial<MarkwaySettings>): void {
@@ -225,6 +281,12 @@ function readTemplateSettings(value: Record<string, unknown>, settings: Partial<
 	if (typeof value.journalIncludeTitleHeading === "boolean") {
 		settings.journalIncludeTitleHeading = value.journalIncludeTitleHeading;
 	}
+	if (typeof value.journalContentTemplate === "string") {
+		settings.journalContentTemplate = value.journalContentTemplate;
+	}
+	if (typeof value.journalPhotosProperty === "string") {
+		settings.journalPhotosProperty = normalizeTemplatePropertyKey(value.journalPhotosProperty);
+	}
 }
 
 function stringArrayValue(value: unknown): string[] {
@@ -237,13 +299,26 @@ function recordValue(value: unknown): Record<string, unknown> {
 	return isRecord(value) ? { ...value } : {};
 }
 
-function readMusicPropertyItems(value: unknown): Record<string, GeneratedMusicPropertyItem[]> {
+function stringRecordValue(value: unknown): Record<string, string> {
 	if (!isRecord(value)) {
 		return {};
 	}
-	const result: Record<string, GeneratedMusicPropertyItem[]> = {};
+	const result: Record<string, string> = {};
+	for (const [key, raw] of Object.entries(value)) {
+		if (typeof raw === "string" && raw) {
+			result[key] = raw;
+		}
+	}
+	return result;
+}
+
+function readAttachmentPropertyItems(value: unknown): Record<string, GeneratedAttachmentPropertyItem[]> {
+	if (!isRecord(value)) {
+		return {};
+	}
+	const result: Record<string, GeneratedAttachmentPropertyItem[]> = {};
 	for (const [key, rawItems] of Object.entries(value)) {
-		const items = Array.isArray(rawItems) ? rawItems.flatMap(readMusicPropertyItem) : [];
+		const items = Array.isArray(rawItems) ? rawItems.flatMap(readAttachmentPropertyItem) : [];
 		if (items.length > 0) {
 			result[key] = items;
 		}
@@ -251,7 +326,7 @@ function readMusicPropertyItems(value: unknown): Record<string, GeneratedMusicPr
 	return result;
 }
 
-function readMusicPropertyItem(item: unknown): GeneratedMusicPropertyItem[] {
+function readAttachmentPropertyItem(item: unknown): GeneratedAttachmentPropertyItem[] {
 	if (!isRecord(item)) {
 		return [];
 	}

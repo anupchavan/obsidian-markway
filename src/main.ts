@@ -8,21 +8,32 @@ import {
 	TFile,
 } from "obsidian";
 import { checkRules, firstFolderFromRules } from "./rules";
+import { extractWikilinkTarget } from "./rules/wikilinks";
 import { MarkwayBridgeClient, type BridgeRequest, type BridgeResponse } from "./bridge-client";
 import { registerMarkwayCommands } from "./commands";
 import {
+	journalBodyContent,
+	journalTemplateNeedsAttachments,
 	journalTemplateNeedsMusic,
+	journalTemplateNeedsPhotos,
 	journalTemplateSettingsHash,
-	renderJournalBody,
+	parseJournalBodySections,
+	renderJournalBodySections,
 	renderJournalTemplateProperties,
+	serializeJournalBody,
+	stripGeneratedContentChrome,
 	stripGeneratedTitleHeading,
+	templateUsesAttachments,
 } from "./journal-template";
+
 import { MarkwaySettingTab } from "./settings";
 import {
+	addedFrontmatterValues,
 	canonicalPath,
 	composeMarkdown,
 	describeUnknown,
 	explainMarkwayError,
+	frontmatterComparableValues,
 	hashJournalContent,
 	hasMatchingJournalSummary,
 	hasUnsyncedMarkdownContent,
@@ -33,7 +44,7 @@ import {
 	normalizePath,
 	preserveMarkdownStructure,
 	readPluginData,
-	removedGeneratedMusicAttachmentIDs,
+	removedGeneratedAttachmentIDs,
 	sameVaultPath,
 	sanitizeFileName,
 	sha256Hex,
@@ -41,13 +52,35 @@ import {
 	splitMarkdown,
 	titleForFile,
 	vaultPathKey,
+	type GeneratedAttachmentPropertyItem,
+	type JournalBodySection,
 	type JournalEntrySummary,
 	type JournalEntryText,
 	type JournalLink,
+	type JournalPhotoAttachment,
 	type MarkwayPluginData,
 	type MarkwaySettings,
 	type SyncOptions,
 } from "./sync-utils";
+
+const IMAGE_ATTACHMENT_EXTENSIONS = new Set([
+	"jpg", "jpeg", "png", "heic", "heif", "gif", "webp", "bmp", "tif", "tiff",
+]);
+
+const VIDEO_ATTACHMENT_EXTENSIONS = new Set([
+	"mov", "mp4", "m4v",
+]);
+
+// Image formats Obsidian can display: https://help.obsidian.md/file-formats
+const OBSIDIAN_IMAGE_EXTENSIONS = new Set([
+	"avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp",
+]);
+
+interface JournalPhotoSyncResult {
+	files: Record<string, string>;
+	values: string[];
+	items: GeneratedAttachmentPropertyItem[];
+}
 
 interface PushOptions {
 	force?: boolean;
@@ -288,12 +321,12 @@ export default class MarkwayPlugin extends Plugin {
 				return;
 			}
 			if (link) {
-				await this.syncRemovedMusicAttachments(file, link);
+				await this.syncGeneratedAttachmentEdits(file, link);
 			}
 
 			const title = titleForFile(file.path);
 			const markdown = await this.app.vault.read(file);
-			const journalBody = this.bodyForJournalPush(markdown, title);
+			const journalBody = this.bodyForJournalPush(markdown, title, link);
 			const journalHash = hashJournalContent(title, journalBody);
 			if (!options.force && link && link.lastJournalHash === journalHash && link.title === title) {
 				this.setStatus(`Markway skipped unchanged ${file.path}`);
@@ -306,6 +339,9 @@ export default class MarkwayPlugin extends Plugin {
 				relativePath: file.path,
 				journalID: link?.journalID,
 				title,
+				// Send the extracted journal text; Markway.app must not push the
+				// raw file, which contains generated template sections.
+				body: journalBody,
 				stripTitleHeading: this.settings.journalIncludeTitleHeading,
 			});
 			if (!result.ok || !result.journalID) {
@@ -324,7 +360,11 @@ export default class MarkwayPlugin extends Plugin {
 				lastTemplateSettingsHash: link?.lastTemplateSettingsHash ?? "",
 				lastTemplatePropertyKeys: link?.lastTemplatePropertyKeys ?? [],
 				lastTemplateProperties: link?.lastTemplateProperties ?? {},
-				lastMusicPropertyItems: link?.lastMusicPropertyItems ?? {},
+				lastAttachmentPropertyItems: link?.lastAttachmentPropertyItems ?? {},
+				lastContentPrefix: link?.lastContentPrefix ?? "",
+				lastContentSuffix: link?.lastContentSuffix ?? "",
+				lastBodySections: link?.lastBodySections ?? [],
+				lastPhotoFiles: link?.lastPhotoFiles ?? {},
 			};
 			this.recentLocalFileChanges.delete(normalizePath(file.path));
 			await this.savePluginData();
@@ -464,11 +504,63 @@ export default class MarkwayPlugin extends Plugin {
 
 		const existingMarkdown = file ? await this.app.vault.read(file) : "";
 		const existingParts = splitMarkdown(existingMarkdown);
-		const renderedBody = renderJournalBody(entry, this.settings.journalIncludeTitleHeading);
-		const mergedBody = file
-			? preserveMarkdownStructure(existingParts.body, renderedBody)
-			: renderedBody;
-		const markdown = composeMarkdown(existingParts.frontmatter, mergedBody);
+
+		// Download photos before rendering, so templates see the converted
+		// vault file names instead of Journal-internal store paths.
+		const photosKey = this.settings.journalPhotosProperty.trim();
+		const photoSync = photosKey
+			? await this.syncJournalPhotoFiles(file?.path ?? desiredPath, entry, existing?.lastPhotoFiles ?? {})
+			: null;
+		const photoFiles = photoSync?.files ?? existing?.lastPhotoFiles ?? {};
+
+		const renderedSections = renderJournalBodySections(entry, this.settings, photoFiles);
+		const previousLayout = existing?.lastBodySections ?? [];
+
+		let mergedContent = entry.body;
+		let existingSections: JournalBodySection[] | null = null;
+		if (file) {
+			let existingBody = existingParts.body;
+			if (this.settings.journalIncludeTitleHeading) {
+				existingBody = stripGeneratedTitleHeading(existingBody, existing?.title ?? entry.title);
+			}
+			existingSections = previousLayout.length > 0
+				? parseJournalBodySections(existingBody, previousLayout)
+				: null;
+			const existingContent = existingSections
+				? existingSections.find((section) => section.kind === "content")?.text ?? existingBody
+				: stripGeneratedContentChrome(
+					existingBody,
+					existing?.lastContentPrefix ?? "",
+					existing?.lastContentSuffix ?? ""
+				);
+			mergedContent = preserveMarkdownStructure(existingContent, entry.body);
+		}
+
+		// A generated section the user edited stays theirs; clean sections
+		// refresh with the new render.
+		const layoutUnchanged = existingSections !== null
+			&& previousLayout.length === renderedSections.length
+			&& previousLayout.every((section, index) =>
+				section.kind === renderedSections[index]?.kind && section.marker === renderedSections[index]?.marker);
+		const finalSections = renderedSections.map((section, index) => {
+			if (section.kind === "content") {
+				return { ...section, text: mergedContent };
+			}
+			if (layoutUnchanged && existingSections) {
+				const currentText = existingSections[index]?.text ?? "";
+				const lastRenderedText = previousLayout[index]?.text ?? "";
+				if (currentText.trim() !== lastRenderedText.trim()) {
+					return { ...section, text: currentText };
+				}
+			}
+			return section;
+		});
+
+		const heading = this.settings.journalIncludeTitleHeading && entry.title.trim()
+			? `# ${entry.title.trim()}\n\n`
+			: "";
+		const renderedBody = `${heading}${serializeJournalBody(finalSections)}`;
+		const markdown = composeMarkdown(existingParts.frontmatter, renderedBody);
 
 		if (file) {
 			this.suppressFile(file.path);
@@ -484,7 +576,12 @@ export default class MarkwayPlugin extends Plugin {
 
 		reservedPaths?.add(vaultPathKey(file.path));
 
-		const templateState = await this.applyJournalTemplateProperties(file, entry);
+		const templateState = await this.applyJournalTemplateProperties(
+			file,
+			entry,
+			existing?.lastPhotoFiles ?? {},
+			photoSync
+		);
 		const markdownHash = sha256Hex(await this.app.vault.read(file));
 		this.journalLinks[entry.id] = {
 			journalID: entry.id,
@@ -498,7 +595,15 @@ export default class MarkwayPlugin extends Plugin {
 			lastTemplateSettingsHash: templateState.settingsHash,
 			lastTemplatePropertyKeys: templateState.propertyKeys,
 			lastTemplateProperties: templateState.properties,
-			lastMusicPropertyItems: templateState.musicPropertyItems,
+			lastAttachmentPropertyItems: templateState.attachmentPropertyItems,
+			lastContentPrefix: "",
+			lastContentSuffix: "",
+			lastBodySections: renderedSections.map((section) => ({
+				kind: section.kind,
+				marker: section.marker,
+				text: section.kind === "generated" ? section.text : "",
+			})),
+			lastPhotoFiles: templateState.photoFiles,
 		};
 	}
 
@@ -507,26 +612,72 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private needsTemplateWrite(link: JournalLink, entry: JournalEntryText): boolean {
-		const rendered = renderJournalTemplateProperties(entry, this.settings);
-		return link.lastTemplateHash !== rendered.hash;
+		const rendered = renderJournalTemplateProperties(entry, this.settings, new Date(), link.lastPhotoFiles);
+		if (link.lastTemplateHash !== rendered.hash) {
+			return true;
+		}
+
+		const sections = renderJournalBodySections(entry, this.settings, link.lastPhotoFiles);
+		const stored = link.lastBodySections;
+		const sectionsChanged = sections.length !== stored.length
+			|| sections.some((section, index) => {
+				const previous = stored[index];
+				return !previous
+					|| previous.kind !== section.kind
+					|| previous.marker !== section.marker
+					|| (section.kind === "generated" && previous.text !== section.text);
+			});
+		if (sectionsChanged) {
+			return true;
+		}
+
+		const photosKey = this.settings.journalPhotosProperty.trim();
+		if (!photosKey) {
+			return false;
+		}
+		const knownIDs = (link.lastAttachmentPropertyItems[photosKey] ?? []).map((item) => item.id);
+		const entryIDs = (entry.photoAttachments ?? []).map((photo) => photo.id);
+		return knownIDs.join("\n") !== entryIDs.join("\n");
 	}
 
 	private async applyJournalTemplateProperties(
 		file: TFile,
-		entry: JournalEntryText
+		entry: JournalEntryText,
+		previousPhotoFiles: Record<string, string> = {},
+		precomputedPhotoSync: JournalPhotoSyncResult | null = null
 	): Promise<{
 		hash: string;
 		settingsHash: string;
 		propertyKeys: string[];
 		properties: Record<string, unknown>;
-		musicPropertyItems: JournalLink["lastMusicPropertyItems"];
+		attachmentPropertyItems: JournalLink["lastAttachmentPropertyItems"];
+		photoFiles: Record<string, string>;
 	}> {
-		const rendered = renderJournalTemplateProperties(entry, this.settings);
-		const propertyKeys = Object.keys(rendered.properties);
+		const photosKey = this.settings.journalPhotosProperty.trim();
+		let photoSync = precomputedPhotoSync;
+		if (photosKey && !photoSync) {
+			photoSync = await this.syncJournalPhotoFiles(file.path, entry, previousPhotoFiles);
+		}
+		const photoFiles = photoSync?.files ?? previousPhotoFiles;
+
+		const rendered = renderJournalTemplateProperties(entry, this.settings, new Date(), photoFiles);
+		const properties = { ...rendered.properties };
+		const attachmentPropertyItems = { ...rendered.attachmentPropertyItems };
+
+		if (photosKey && photoSync) {
+			properties[photosKey] = photoSync.values;
+			if (photoSync.items.length > 0) {
+				attachmentPropertyItems[photosKey] = photoSync.items;
+			} else {
+				delete attachmentPropertyItems[photosKey];
+			}
+		}
+
+		const propertyKeys = Object.keys(properties);
 		this.suppressFile(file.path);
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			const metadata = frontmatter as Record<string, unknown>;
-			for (const [key, value] of Object.entries(rendered.properties)) {
+			for (const [key, value] of Object.entries(properties)) {
 				metadata[key] = value;
 			}
 		});
@@ -535,9 +686,110 @@ export default class MarkwayPlugin extends Plugin {
 			hash: rendered.hash,
 			settingsHash: journalTemplateSettingsHash(this.settings),
 			propertyKeys,
-			properties: rendered.properties,
-			musicPropertyItems: rendered.musicPropertyItems,
+			properties,
+			attachmentPropertyItems,
+			photoFiles,
 		};
+	}
+
+	private async syncJournalPhotoFiles(
+		notePath: string,
+		entry: JournalEntryText,
+		previousFiles: Record<string, string>
+	): Promise<JournalPhotoSyncResult> {
+		const files: Record<string, string> = {};
+		const values: string[] = [];
+		const items: GeneratedAttachmentPropertyItem[] = [];
+
+		for (const [index, photo] of (entry.photoAttachments ?? []).entries()) {
+			if (!photo.id) {
+				continue;
+			}
+			const previousPath = previousFiles[photo.id];
+			let path = previousPath && this.fileForPath(previousPath) ? previousPath : null;
+			path ??= await this.downloadJournalPhotoFile(entry, photo, index, notePath);
+			if (!path) {
+				continue;
+			}
+			files[photo.id] = path;
+			const value = `[[${basename(path)}]]`;
+			values.push(value);
+			items.push({ id: photo.id, value });
+		}
+
+		values.push(...this.unmanagedPhotoPropertyValues(notePath, values));
+		return { files, values, items };
+	}
+
+	private unmanagedPhotoPropertyValues(notePath: string, generatedValues: string[]): string[] {
+		const file = this.fileForPath(notePath);
+		if (!file) {
+			return [];
+		}
+		const photosKey = this.settings.journalPhotosProperty.trim();
+		const link = this.linkForFile(file);
+		const managed = new Set([
+			...generatedValues,
+			...(link?.lastAttachmentPropertyItems[photosKey] ?? []).map((item) => item.value),
+		]);
+		const frontmatter = this.frontmatterForFile(file);
+		if (!Object.prototype.hasOwnProperty.call(frontmatter, photosKey)) {
+			return [];
+		}
+
+		return frontmatterComparableValues(frontmatter[photosKey]).filter(
+			(value) => !managed.has(value) && !this.resolveVaultAttachmentFile(value, file.path)
+		);
+	}
+
+	private async downloadJournalPhotoFile(
+		entry: JournalEntryText,
+		photo: JournalPhotoAttachment,
+		index: number,
+		notePath: string
+	): Promise<string | null> {
+		const photoFiles = photo.files ?? [];
+		const primary = photoFiles.find((item) => item.name === "image") ?? photoFiles[0];
+		const sourcePath = primary?.relativePath || primary?.absolutePath || "";
+		const sourceExtension = extname(sourcePath).replace(/^\./, "").toLowerCase();
+		// Journal photos are usually HEIC, which Obsidian cannot display, so
+		// Markway.app converts those to JPEG while exporting.
+		const extension = OBSIDIAN_IMAGE_EXTENSIONS.has(sourceExtension) ? sourceExtension : "jpg";
+		const title = sanitizeFileName(entry.title || "Journal entry");
+
+		try {
+			const destination = normalizePath(
+				await this.app.fileManager.getAvailablePathForAttachment(`${title} - ${index + 1}.${extension}`, notePath)
+			);
+			const result = await this.sendBridgeRequest({
+				kind: "journalExportAttachment",
+				journalID: entry.id,
+				assetID: photo.id,
+				relativePath: destination,
+			});
+			if (!result.ok) {
+				throw new Error(result.message || "Markway.app could not export the photo.");
+			}
+			return destination;
+		} catch (error) {
+			this.logSilentError(`Markway could not download Journal photo ${photo.id}`, error);
+			return null;
+		}
+	}
+
+	private resolveVaultAttachmentFile(value: string, sourcePath: string): TFile | null {
+		const target = extractWikilinkTarget(value).trim();
+		if (!target) {
+			return null;
+		}
+		const file = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+		if (!file) {
+			return null;
+		}
+		const extension = file.extension.toLowerCase();
+		return IMAGE_ATTACHMENT_EXTENSIONS.has(extension) || VIDEO_ATTACHMENT_EXTENSIONS.has(extension)
+			? file
+			: null;
 	}
 
 	private async hasUnsyncedLocalChanges(link: JournalLink): Promise<boolean> {
@@ -552,7 +804,7 @@ export default class MarkwayPlugin extends Plugin {
 
 		const markdown = await this.app.vault.read(file);
 		const title = titleForFile(file.path);
-		return hasUnsyncedMarkdownContent(link, markdown, title, this.bodyForJournalPush(markdown, title));
+		return hasUnsyncedMarkdownContent(link, markdown, title, this.bodyForJournalPush(markdown, title, link));
 	}
 
 	private queuePushForLink(link: JournalLink) {
@@ -582,53 +834,135 @@ export default class MarkwayPlugin extends Plugin {
 		return true;
 	}
 
-	private bodyForJournalPush(markdown: string, title: string): string {
-		const body = splitMarkdown(markdown).body;
-		return this.settings.journalIncludeTitleHeading
-			? stripGeneratedTitleHeading(body, title)
-			: body;
+	private bodyForJournalPush(markdown: string, title: string, link?: JournalLink | null): string {
+		let body = splitMarkdown(markdown).body;
+		if (this.settings.journalIncludeTitleHeading) {
+			body = stripGeneratedTitleHeading(body, title);
+		}
+		if (!link) {
+			return body;
+		}
+		if (link.lastBodySections.some((section) => section.marker)) {
+			const content = journalBodyContent(body, link.lastBodySections);
+			if (content !== null) {
+				return content;
+			}
+		}
+		return stripGeneratedContentChrome(body, link.lastContentPrefix, link.lastContentSuffix);
 	}
 
-	private async syncRemovedMusicAttachments(file: TFile, link: JournalLink): Promise<void> {
-		const activeMusicKeys = new Set(
+	private async syncGeneratedAttachmentEdits(file: TFile, link: JournalLink): Promise<void> {
+		const photosKey = this.settings.journalPhotosProperty.trim();
+		const activeAttachmentKeys = new Set(
 			this.settings.journalProperties
-				.filter((property) => property.key.trim() && property.value.includes("{{music"))
+				.filter((property) => property.key.trim() && templateUsesAttachments(property.value))
 				.map((property) => property.key.trim())
 		);
-		if (activeMusicKeys.size === 0) {
+		if (photosKey) {
+			activeAttachmentKeys.add(photosKey);
+		}
+		if (activeAttachmentKeys.size === 0) {
 			return;
 		}
 
 		const frontmatter = this.frontmatterForFile(file);
 		const assetIDs = new Set<string>();
-		for (const [propertyKey, previousItems] of Object.entries(link.lastMusicPropertyItems)) {
-			if (!activeMusicKeys.has(propertyKey) || !Object.prototype.hasOwnProperty.call(frontmatter, propertyKey)) {
+		for (const [propertyKey, previousItems] of Object.entries(link.lastAttachmentPropertyItems)) {
+			if (!activeAttachmentKeys.has(propertyKey) || !Object.prototype.hasOwnProperty.call(frontmatter, propertyKey)) {
 				continue;
 			}
-			for (const assetID of removedGeneratedMusicAttachmentIDs(previousItems, frontmatter[propertyKey])) {
+			for (const assetID of removedGeneratedAttachmentIDs(previousItems, frontmatter[propertyKey])) {
 				assetIDs.add(assetID);
 			}
 		}
 
-		if (assetIDs.size === 0) {
+		const addedFiles = photosKey && Object.prototype.hasOwnProperty.call(frontmatter, photosKey)
+			? this.addedPhotoAttachmentFiles(link, frontmatter[photosKey], file.path)
+			: [];
+
+		if (assetIDs.size === 0 && addedFiles.length === 0) {
 			return;
 		}
 
 		for (const assetID of assetIDs) {
 			await this.deleteJournalAttachment(link.journalID, assetID, { silent: true });
 		}
+		for (const added of addedFiles) {
+			const result = await this.sendBridgeRequest({
+				kind: "journalAddAttachment",
+				journalID: link.journalID,
+				relativePath: added.path,
+			});
+			if (!result.ok) {
+				this.logSilentError(
+					`Markway could not add ${added.path} to Journal`,
+					new Error(result.message || "Markway.app rejected the attachment.")
+				);
+			}
+		}
 
 		const entry = await this.getJournalEntry(link.journalID);
-		const templateState = await this.applyJournalTemplateProperties(file, entry);
+		const previousPhotoFiles = addedFiles.length > 0
+			? this.mapNewPhotoAttachments(entry, link.lastPhotoFiles, assetIDs, addedFiles)
+			: link.lastPhotoFiles;
+		const templateState = await this.applyJournalTemplateProperties(file, entry, previousPhotoFiles);
 		link.lastTemplateHash = templateState.hash;
 		link.lastTemplateSettingsHash = templateState.settingsHash;
 		link.lastTemplatePropertyKeys = templateState.propertyKeys;
 		link.lastTemplateProperties = templateState.properties;
-		link.lastMusicPropertyItems = templateState.musicPropertyItems;
+		link.lastAttachmentPropertyItems = templateState.attachmentPropertyItems;
+		link.lastPhotoFiles = templateState.photoFiles;
 		link.lastJournalHash = hashJournalContent(entry.title, entry.body);
 		link.lastJournalUpdated = entry.updated || link.lastJournalUpdated;
 		link.lastSyncedAt = new Date().toISOString();
 		await this.savePluginData();
+	}
+
+	private addedPhotoAttachmentFiles(link: JournalLink, currentValue: unknown, sourcePath: string): TFile[] {
+		const photosKey = this.settings.journalPhotosProperty.trim();
+		const previousItems = link.lastAttachmentPropertyItems[photosKey] ?? [];
+		const knownPaths = new Set(Object.values(link.lastPhotoFiles));
+		const added: TFile[] = [];
+		const seen = new Set<string>();
+
+		for (const value of addedFrontmatterValues(previousItems, currentValue)) {
+			const file = this.resolveVaultAttachmentFile(value, sourcePath);
+			if (!file || knownPaths.has(file.path) || seen.has(file.path)) {
+				continue;
+			}
+			seen.add(file.path);
+			added.push(file);
+		}
+		return added;
+	}
+
+	private mapNewPhotoAttachments(
+		entry: JournalEntryText,
+		previousFiles: Record<string, string>,
+		removedAssetIDs: Set<string>,
+		addedFiles: TFile[]
+	): Record<string, string> {
+		const files: Record<string, string> = {};
+		for (const [assetID, path] of Object.entries(previousFiles)) {
+			if (!removedAssetIDs.has(assetID)) {
+				files[assetID] = path;
+			}
+		}
+
+		const newIDs = (entry.photoAttachments ?? [])
+			.map((photo) => photo.id)
+			.filter((id) => id && !(id in files));
+		// Journal appends new attachments in add order; only map when the counts
+		// line up so an unrelated new photo cannot claim the wrong vault file.
+		if (newIDs.length === addedFiles.length) {
+			newIDs.forEach((id, index) => {
+				const added = addedFiles[index];
+				if (added) {
+					files[id] = added.path;
+				}
+			});
+		}
+		return files;
 	}
 
 	private async renameFileSafely(file: TFile, targetPath: string): Promise<TFile | null> {
@@ -776,7 +1110,11 @@ export default class MarkwayPlugin extends Plugin {
 			lastTemplateSettingsHash: "",
 			lastTemplatePropertyKeys: [],
 			lastTemplateProperties: {},
-			lastMusicPropertyItems: {},
+			lastAttachmentPropertyItems: {},
+			lastContentPrefix: "",
+			lastContentSuffix: "",
+			lastBodySections: [],
+			lastPhotoFiles: {},
 		};
 
 		this.suppressFile(file.path);
@@ -825,6 +1163,8 @@ export default class MarkwayPlugin extends Plugin {
 			kind: "journalGet",
 			journalID,
 			includeMusicAttachments: journalTemplateNeedsMusic(this.settings),
+			includePhotoAttachments: journalTemplateNeedsPhotos(this.settings),
+			includeAttachments: journalTemplateNeedsAttachments(this.settings),
 		}, 60_000);
 		if (!result.ok || !result.entry) {
 			throw new Error(result.message || `Markway app could not read Journal entry ${journalID}.`);

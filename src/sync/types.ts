@@ -10,6 +10,8 @@ export interface MarkwaySettings {
 	deleteMarkdownFileWhenJournalDeleted: boolean;
 	journalProperties: JournalTemplateProperty[];
 	journalIncludeTitleHeading: boolean;
+	journalContentTemplate: string;
+	journalPhotosProperty: string;
 }
 
 export interface JournalTemplateProperty {
@@ -30,10 +32,23 @@ export interface JournalLink {
 	lastTemplateSettingsHash: string;
 	lastTemplatePropertyKeys: string[];
 	lastTemplateProperties: Record<string, unknown>;
-	lastMusicPropertyItems: Record<string, GeneratedMusicPropertyItem[]>;
+	lastAttachmentPropertyItems: Record<string, GeneratedAttachmentPropertyItem[]>;
+	lastContentPrefix: string;
+	lastContentSuffix: string;
+	lastBodySections: JournalBodySection[];
+	lastPhotoFiles: Record<string, string>;
 }
 
-export interface GeneratedMusicPropertyItem {
+/// One region of a synced note body. Generated sections hold the text Markway
+/// last rendered for them; the content section's text is tracked through
+/// lastJournalHash instead and stays empty here.
+export interface JournalBodySection {
+	kind: "generated" | "content";
+	marker: string;
+	text: string;
+}
+
+export interface GeneratedAttachmentPropertyItem {
 	id: string;
 	value: string;
 }
@@ -50,6 +65,20 @@ export interface JournalEntryText {
 	created?: string;
 	updated?: string;
 	musicAttachments?: JournalMusicAttachment[];
+	photoAttachments?: JournalPhotoAttachment[];
+	attachments?: JournalGenericAttachment[];
+}
+
+export interface JournalGenericAttachment {
+	id: string;
+	assetType: string;
+	source?: string;
+	isHidden?: boolean;
+	isSlim?: boolean;
+	createdDate?: string;
+	suggestionDate?: string;
+	files?: JournalAttachmentFile[];
+	metadata?: Record<string, unknown>;
 }
 
 export interface JournalMusicAttachment {
@@ -64,6 +93,27 @@ export interface JournalMusicAttachment {
 	startTime?: number;
 	createdDate?: string;
 	suggestionDate?: string;
+}
+
+export interface JournalPhotoAttachment {
+	id: string;
+	source?: string;
+	isHidden?: boolean;
+	isSlim?: boolean;
+	assetIdentifier?: string;
+	assetDate?: number;
+	createdDate?: string;
+	suggestionDate?: string;
+	files?: JournalAttachmentFile[];
+}
+
+export interface JournalAttachmentFile {
+	id: string;
+	name?: string;
+	relativePath?: string;
+	absolutePath?: string;
+	exists?: boolean;
+	byteLength?: number;
 }
 
 export interface JournalEntrySummary {

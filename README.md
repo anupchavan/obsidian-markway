@@ -1,20 +1,6 @@
-# Markway for Obsidian
-
-Markway for Obsidian syncs Markdown notes with Apple Journal through Markway.app.
+Markway for Obsidian syncs Markdown notes with Apple Journal through the [Markway](https://github.com/anupchavan/markway) app.
 
 It is the Obsidian adapter for the larger Markway project: a gateway between Apple services and Markdown. The plugin watches eligible Markdown files, asks the native Markway app to push or pull Journal entries, and keeps sync metadata in plugin data instead of cluttering note frontmatter.
-
-## Important Security Model
-
-The plugin does not need Full Disk Access.
-
-Apple Journal data lives in protected macOS group containers. Instead of asking users to grant Obsidian broad permissions, the plugin communicates with Markway.app through a local bridge inside the current vault:
-
-```text
-<vault>/.obsidian/plugins/markway/bridge
-```
-
-Markway.app holds the macOS permissions and performs Journal operations. The plugin does not expose a network socket, does not import Node's `fs` module, and does not grant Obsidian access to Apple's Journal container. The plugin writes request files through Obsidian's vault adapter, and Markway.app reads those files from the vault path selected by the user.
 
 ## Requirements
 
@@ -27,11 +13,16 @@ The plugin is desktop-only because the current Journal bridge depends on macOS.
 
 ## Installation
 
-For beta releases:
+Markway for Obsidian can be installed from the Obsidian Community Plugins browser or manually from GitHub releases.
+
+- Obsidian Community Plugins: [community.obsidian.md/plugins/markway](https://community.obsidian.md/plugins/markway)
+- GitHub releases: [github.com/anupchavan/obsidian-markway/releases](https://github.com/anupchavan/obsidian-markway/releases)
+
+Manual installation from GitHub releases:
 
 1. Install and open Markway.app.
 2. Choose your vault in Markway.app.
-3. Grant Full Disk Access to Markway.app, not Obsidian.
+3. Grant Full Disk Access to Markway.app.
 4. Download the plugin release files:
    - `main.js`
    - `manifest.json`

@@ -1,7 +1,11 @@
 import { PluginSettingTab, requireApiVersion, Setting } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
 import type MarkwayPlugin from "../main";
-import { renderJournalTemplatePropertyRow } from "../journal-template-ui";
+import {
+	renderJournalContentTemplateControl,
+	renderJournalPhotosPropertyControl,
+	renderJournalTemplatePropertyRow,
+} from "../journal-template-ui";
 import { renderJournalRules } from "../rules-ui";
 import {
 	DEFAULT_SETTINGS,
@@ -140,12 +144,38 @@ export class MarkwaySettingTab extends PluginSettingTab {
 				control: { type: "toggle", key: "deleteMarkdownFileWhenJournalDeleted", defaultValue: false },
 			},
 			this.propertiesItem(),
+			this.contentTemplateItem(),
 			{
 				name: "Add title as heading",
 				desc: "Show the Journal title as the first Markdown heading when pulling entries.",
 				control: { type: "toggle", key: "journalIncludeTitleHeading", defaultValue: false },
 			},
+			this.photosPropertyItem(),
 		];
+	}
+
+	private contentTemplateItem(): SettingDefinitionItem<MarkwaySettingKey> {
+		return {
+			name: "Note content",
+			desc: "Template for the note body when pulling entries. {{content}} is the journal entry text.",
+			render: (setting) => {
+				renderJournalContentTemplateControl(setting, this.plugin, () => {
+					this.plugin.queueTemplateRefresh();
+				});
+			},
+		};
+	}
+
+	private photosPropertyItem(): SettingDefinitionItem<MarkwaySettingKey> {
+		return {
+			name: "Photos property",
+			desc: "Markway downloads journal photos into your attachment folder and lists them in this property. Remove a value to delete that journal photo, or add an image or video from your vault to attach it. Leave empty to disable.",
+			render: (setting) => {
+				renderJournalPhotosPropertyControl(setting, this.plugin, () => {
+					this.plugin.queueTemplateRefresh();
+				});
+			},
+		};
 	}
 
 	private rulesItem(): SettingDefinitionItem<MarkwaySettingKey> {

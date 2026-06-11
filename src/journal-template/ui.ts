@@ -1,6 +1,6 @@
 import { Setting, setIcon } from "obsidian";
 import type MarkwayPlugin from "../main";
-import { validateTemplateVariables } from ".";
+import { validateContentTemplate, validateTemplateVariables } from ".";
 import { PropertySuggest } from "../rule-suggests";
 import { normalizeTemplatePropertyKey, type JournalTemplateProperty } from "../sync-utils";
 
@@ -40,8 +40,13 @@ export function renderJournalTemplateSettings(
 
 	new Setting(container)
 		.setName("Note content")
-		.setDesc("Journal text stays as the note body. This option only controls a generated title heading.")
+		.setDesc("Controls the note body when pulling journal entries.")
 		.setHeading();
+
+	const contentSetting = new Setting(container)
+		.setName("Content template")
+		.setDesc("Template for the note body. {{content}} is the journal entry text.");
+	renderJournalContentTemplateControl(contentSetting, plugin, onTemplateChanged);
 
 	new Setting(container)
 		.setName("Add title as heading")
@@ -55,6 +60,83 @@ export function renderJournalTemplateSettings(
 					onTemplateChanged();
 				})
 		);
+
+	const photosSetting = new Setting(container)
+		.setName("Photos property")
+		.setDesc("Markway downloads journal photos into your attachment folder and lists them in this property. Remove a value to delete that journal photo, or add an image or video from your vault to attach it. Leave empty to disable.");
+	renderJournalPhotosPropertyControl(photosSetting, plugin, onTemplateChanged);
+}
+
+export function renderJournalContentTemplateControl(
+	setting: Setting,
+	plugin: MarkwayPlugin,
+	onTemplateChanged: () => void = () => { }
+): void {
+	setting.settingEl.addClass("mw-template-setting");
+	let warningsEl: HTMLElement | null = null;
+
+	const renderWarnings = () => {
+		warningsEl?.remove();
+		warningsEl = renderSettingWarnings(setting, validateContentTemplate(plugin.settings.journalContentTemplate));
+	};
+
+	setting.addTextArea((textArea) => {
+		textArea.setPlaceholder("{{content}}");
+		textArea.setValue(plugin.settings.journalContentTemplate);
+		textArea.inputEl.addClass("mw-template-content-textarea");
+		textArea.inputEl.rows = 4;
+		textArea.inputEl.addEventListener("change", () => {
+			void (async () => {
+				plugin.settings.journalContentTemplate = textArea.inputEl.value;
+				await plugin.savePluginData();
+				renderWarnings();
+				onTemplateChanged();
+			})();
+		});
+	});
+
+	renderWarnings();
+}
+
+export function renderJournalPhotosPropertyControl(
+	setting: Setting,
+	plugin: MarkwayPlugin,
+	onTemplateChanged: () => void = () => { }
+): void {
+	setting.addText((text) => {
+		text.setPlaceholder("Photos");
+		text.setValue(plugin.settings.journalPhotosProperty);
+
+		const save = (raw: string) => {
+			void (async () => {
+				plugin.settings.journalPhotosProperty = normalizeTemplatePropertyKey(raw);
+				text.inputEl.value = plugin.settings.journalPhotosProperty;
+				await plugin.savePluginData();
+				onTemplateChanged();
+			})();
+		};
+		text.inputEl.addEventListener("change", () => {
+			save(text.inputEl.value);
+		});
+		new PropertySuggest(plugin.app, text.inputEl).onSelectCb((value) => {
+			text.inputEl.value = value;
+			save(value);
+		});
+	});
+}
+
+function renderSettingWarnings(setting: Setting, messages: string[]): HTMLElement | null {
+	if (messages.length === 0) {
+		return null;
+	}
+	const warningsEl = setting.settingEl.createDiv({ cls: "mw-template-content-warnings" });
+	for (const message of messages) {
+		const warning = warningsEl.createDiv({ cls: "mw-template-warning mw-template-content-warning" });
+		const warningIcon = warning.createSpan({ cls: "mw-template-warning-icon" });
+		setIcon(warningIcon, "triangle-alert");
+		warning.createSpan({ text: message });
+	}
+	return warningsEl;
 }
 
 export function renderJournalTemplatePropertyRow(

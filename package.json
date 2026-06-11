@@ -29,6 +29,7 @@
         "vitest": "^4.1.8"
     },
     "dependencies": {
+        "dayjs": "^1.11.21",
         "obsidian": "latest"
     }
 }

@@ -22,7 +22,8 @@ import {
 	readJournalLinks,
 	readPluginData,
 	readSettings,
-	removedGeneratedMusicAttachmentIDs,
+	addedFrontmatterValues,
+	removedGeneratedAttachmentIDs,
 	sameVaultPath,
 	sanitizeFileName,
 	sha256Hex,
@@ -177,7 +178,7 @@ describe("journal links", () => {
 			lastTemplateSettingsHash: "",
 			lastTemplatePropertyKeys: [],
 			lastTemplateProperties: {},
-			lastMusicPropertyItems: {},
+			lastAttachmentPropertyItems: {},
 		});
 	});
 
@@ -200,7 +201,11 @@ describe("journal links", () => {
 					lastTemplateSettingsHash: "",
 					lastTemplatePropertyKeys: [],
 					lastTemplateProperties: {},
-					lastMusicPropertyItems: {},
+					lastAttachmentPropertyItems: {},
+					lastContentPrefix: "",
+					lastContentSuffix: "",
+					lastBodySections: [],
+					lastPhotoFiles: {},
 				},
 			{ id: "A", status: "active", created: "", updated: "u", title: "Title" }
 		)).toBe(true);
@@ -220,7 +225,11 @@ describe("journal links", () => {
 					lastTemplateSettingsHash: "",
 					lastTemplatePropertyKeys: [],
 					lastTemplateProperties: {},
-					lastMusicPropertyItems: {},
+					lastAttachmentPropertyItems: {},
+					lastContentPrefix: "",
+					lastContentSuffix: "",
+					lastBodySections: [],
+					lastPhotoFiles: {},
 				},
 			{ id: "A", status: "active", created: "", title: "Title" }
 		)).toBe(false);
@@ -409,12 +418,12 @@ describe("generated attachment frontmatter", () => {
 		]);
 	});
 
-	it("detects a simple removal from generated music frontmatter", () => {
-		expect(removedGeneratedMusicAttachmentIDs(generated, ["[[Sahiba]]", "[[Cornfield Chase]]"])).toEqual(["B"]);
+	it("detects a simple removal from generated frontmatter", () => {
+		expect(removedGeneratedAttachmentIDs(generated, ["[[Sahiba]]", "[[Cornfield Chase]]"])).toEqual(["B"]);
 	});
 
 	it("does not delete when a generated music item is edited in place", () => {
-		expect(removedGeneratedMusicAttachmentIDs(generated, [
+		expect(removedGeneratedAttachmentIDs(generated, [
 			"[[Sahiba]]",
 			"[[How do you know - alternate name]]",
 			"[[Cornfield Chase]]",
@@ -422,7 +431,7 @@ describe("generated attachment frontmatter", () => {
 	});
 
 	it("does not delete when a new music-looking value is added", () => {
-		expect(removedGeneratedMusicAttachmentIDs(generated, [
+		expect(removedGeneratedAttachmentIDs(generated, [
 			"[[Sahiba]]",
 			"[[How do you know]]",
 			"[[Cornfield Chase]]",
@@ -431,14 +440,141 @@ describe("generated attachment frontmatter", () => {
 	});
 
 	it("does not delete when removal is mixed with an edit", () => {
-		expect(removedGeneratedMusicAttachmentIDs(generated, ["[[Sahiba alt]]", "[[Cornfield Chase]]"])).toEqual([]);
+		expect(removedGeneratedAttachmentIDs(generated, ["[[Sahiba alt]]", "[[Cornfield Chase]]"])).toEqual([]);
 	});
 
 	it("does not delete ambiguous duplicate generated values", () => {
-		expect(removedGeneratedMusicAttachmentIDs([
+		expect(removedGeneratedAttachmentIDs([
 			{ id: "A", value: "[[Same]]" },
 			{ id: "B", value: "[[Same]]" },
 		], ["[[Same]]"])).toEqual([]);
+	});
+
+	it("reads legacy music property items into attachment property items", () => {
+		const links = readJournalLinks({
+			A: {
+				path: "Journal/Entry.md",
+				lastMusicPropertyItems: {
+					music: [{ id: "MUSIC-ID", value: "[[Sahiba]]" }],
+				},
+			},
+		});
+		expect(links.A?.lastAttachmentPropertyItems).toEqual({
+			music: [{ id: "MUSIC-ID", value: "[[Sahiba]]" }],
+		});
+	});
+
+	it("prefers current attachment property items over legacy music items", () => {
+		const links = readJournalLinks({
+			A: {
+				path: "Journal/Entry.md",
+				lastAttachmentPropertyItems: {
+					photos: [{ id: "PHOTO-ID", value: "[[photo.heic]]" }],
+				},
+				lastMusicPropertyItems: {
+					music: [{ id: "MUSIC-ID", value: "[[Sahiba]]" }],
+				},
+			},
+		});
+		expect(links.A?.lastAttachmentPropertyItems).toEqual({
+			photos: [{ id: "PHOTO-ID", value: "[[photo.heic]]" }],
+		});
+	});
+});
+
+describe("generated photo frontmatter", () => {
+	const generated = [
+		{ id: "C0CA3030", value: "[[5D52141E_resized.heic]]" },
+		{ id: "CA952F27", value: "[[AE5E6288_resized.heic]]" },
+		{ id: "8D981B70", value: "[[0CC3C63D_resized.heic]]" },
+	];
+
+	it("detects a simple removal from generated photo frontmatter", () => {
+		expect(removedGeneratedAttachmentIDs(generated, [
+			"[[5D52141E_resized.heic]]",
+			"[[0CC3C63D_resized.heic]]",
+		])).toEqual(["CA952F27"]);
+	});
+
+	it("does not delete when a generated photo item is edited in place", () => {
+		expect(removedGeneratedAttachmentIDs(generated, [
+			"[[5D52141E_resized.heic]]",
+			"[[AE5E6288_resized.heic|Beach]]",
+			"[[0CC3C63D_resized.heic]]",
+		])).toEqual([]);
+	});
+
+	it("does not delete when a new photo-looking value is added", () => {
+		expect(removedGeneratedAttachmentIDs(generated, [
+			"[[5D52141E_resized.heic]]",
+			"[[AE5E6288_resized.heic]]",
+			"[[0CC3C63D_resized.heic]]",
+			"[[New photo.heic]]",
+		])).toEqual([]);
+	});
+
+	it("does not delete when a photo removal is mixed with an edit", () => {
+		expect(removedGeneratedAttachmentIDs(generated, [
+			"[[5D52141E_resized edited.heic]]",
+			"[[0CC3C63D_resized.heic]]",
+		])).toEqual([]);
+	});
+
+	it("does not delete ambiguous duplicate generated photo values", () => {
+		expect(removedGeneratedAttachmentIDs([
+			{ id: "A", value: "[[Same.heic]]" },
+			{ id: "B", value: "[[Same.heic]]" },
+		], ["[[Same.heic]]"])).toEqual([]);
+	});
+
+	it("detects values added to a generated photo property", () => {
+		expect(addedFrontmatterValues(generated, [
+			"[[5D52141E_resized.heic]]",
+			"[[AE5E6288_resized.heic]]",
+			"[[0CC3C63D_resized.heic]]",
+			"[[Sunset.png]]",
+		])).toEqual(["[[Sunset.png]]"]);
+	});
+
+	it("reports no additions for unchanged generated values", () => {
+		expect(addedFrontmatterValues(generated, [
+			"[[5D52141E_resized.heic]]",
+			"[[AE5E6288_resized.heic]]",
+			"[[0CC3C63D_resized.heic]]",
+		])).toEqual([]);
+	});
+
+	it("treats duplicated generated values as additions", () => {
+		expect(addedFrontmatterValues([
+			{ id: "A", value: "[[Same.heic]]" },
+		], ["[[Same.heic]]", "[[Same.heic]]"])).toEqual(["[[Same.heic]]"]);
+	});
+
+	it("reports additions even when another value was removed", () => {
+		expect(addedFrontmatterValues(generated, [
+			"[[5D52141E_resized.heic]]",
+			"[[New.png]]",
+		])).toEqual(["[[New.png]]"]);
+	});
+
+	it("reads the photos property setting", () => {
+		expect(readSettings({ journalPhotosProperty: " photos " })).toMatchObject({
+			journalPhotosProperty: "photos",
+		});
+	});
+
+	it("reads stored photo file mappings", () => {
+		const links = readJournalLinks({
+			A: {
+				path: "Journal/Entry.md",
+				lastPhotoFiles: { "PHOTO-ID": "Attachments/Trip - 1.heic", BAD: 7 },
+				lastContentPrefix: "Photos: 2\n\n",
+				lastContentSuffix: "\n---",
+			},
+		});
+		expect(links.A?.lastPhotoFiles).toEqual({ "PHOTO-ID": "Attachments/Trip - 1.heic" });
+		expect(links.A?.lastContentPrefix).toBe("Photos: 2\n\n");
+		expect(links.A?.lastContentSuffix).toBe("\n---");
 	});
 });
 
@@ -456,7 +592,11 @@ describe("sync decisions and errors", () => {
 			lastTemplateSettingsHash: "",
 			lastTemplatePropertyKeys: [],
 			lastTemplateProperties: {},
-			lastMusicPropertyItems: {},
+			lastAttachmentPropertyItems: {},
+			lastContentPrefix: "",
+			lastContentSuffix: "",
+			lastBodySections: [],
+			lastPhotoFiles: {},
 		};
 	}
 

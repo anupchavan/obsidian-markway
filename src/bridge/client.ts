@@ -3,12 +3,15 @@ import { normalizePath, sleep, type JournalEntrySummary, type JournalEntryText }
 
 export interface BridgeRequest {
 	id: string;
-	kind: "doctor" | "journalList" | "journalGet" | "journalPush" | "journalPull" | "journalDelete" | "journalDeleteAttachment";
+	kind: "doctor" | "journalList" | "journalGet" | "journalPush" | "journalPull" | "journalDelete" | "journalDeleteAttachment" | "journalExportAttachment" | "journalAddAttachment";
+	body?: string;
 	relativePath?: string;
 	journalID?: string;
 	assetID?: string;
 	title?: string;
 	includeMusicAttachments?: boolean;
+	includePhotoAttachments?: boolean;
+	includeAttachments?: boolean;
 	stripTitleHeading?: boolean;
 	requestedAt: string;
 }
