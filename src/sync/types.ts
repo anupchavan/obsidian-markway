@@ -43,6 +43,28 @@ export interface JournalLink {
 	lastPhotoFiles: Record<string, string>;
 }
 
+export interface PendingJournalPush {
+	requestID: string;
+	path: string;
+	title: string;
+	existingJournalID: string;
+	created: string;
+	createdKey: string;
+	markdownHash: string;
+	journalHash: string;
+	lastJournalCreated: string;
+	lastJournalUpdated: string;
+	lastTemplateHash: string;
+	lastTemplateSettingsHash: string;
+	lastTemplatePropertyKeys: string[];
+	lastTemplateProperties: Record<string, unknown>;
+	lastAttachmentPropertyItems: Record<string, GeneratedAttachmentPropertyItem[]>;
+	lastContentPrefix: string;
+	lastContentSuffix: string;
+	lastBodySections: JournalBodySection[];
+	lastPhotoFiles: Record<string, string>;
+}
+
 /// One region of a synced note body. Generated sections hold the text Markway
 /// last rendered for them; the content section's text is tracked through
 /// lastJournalHash instead and stays empty here.
@@ -60,6 +82,7 @@ export interface GeneratedAttachmentPropertyItem {
 export interface MarkwayPluginData {
 	settings: MarkwaySettings;
 	journalLinks: Record<string, JournalLink>;
+	pendingJournalPushes: Record<string, PendingJournalPush>;
 }
 
 export interface JournalEntryText {

@@ -12,6 +12,7 @@ import type {
 	JournalTemplateProperty,
 	MarkwayPluginData,
 	MarkwaySettings,
+	PendingJournalPush,
 } from "./types";
 
 const DEFAULT_DEBOUNCE_MS = 1200;
@@ -50,7 +51,7 @@ export function defaultMarkwaySettings(journalFolder = DEFAULT_JOURNAL_FOLDER): 
 
 export function readPluginData(value: unknown): MarkwayPluginData {
 	if (!isRecord(value)) {
-		return { settings: defaultMarkwaySettings(), journalLinks: {} };
+		return { settings: defaultMarkwaySettings(), journalLinks: {}, pendingJournalPushes: {} };
 	}
 
 	const rawSettings = isRecord(value.settings) ? value.settings : value;
@@ -66,6 +67,7 @@ export function readPluginData(value: unknown): MarkwayPluginData {
 			journalRules: parsedSettings.journalRules ?? defaults.journalRules,
 		},
 		journalLinks: readJournalLinks(value.journalLinks),
+		pendingJournalPushes: readPendingJournalPushes(value.pendingJournalPushes),
 	};
 }
 
@@ -82,6 +84,21 @@ export function readJournalLinks(value: unknown): Record<string, JournalLink> {
 		}
 	}
 	return links;
+}
+
+export function readPendingJournalPushes(value: unknown): Record<string, PendingJournalPush> {
+	if (!isRecord(value)) {
+		return {};
+	}
+
+	const pending: Record<string, PendingJournalPush> = {};
+	for (const [requestID, rawPush] of Object.entries(value)) {
+		const push = readPendingJournalPush(requestID, rawPush);
+		if (push) {
+			pending[push.requestID] = push;
+		}
+	}
+	return pending;
 }
 
 export function readSettings(value: unknown): Partial<MarkwaySettings> {
@@ -244,6 +261,39 @@ function readJournalLink(journalID: string, rawLink: unknown): JournalLink | nul
 		lastContentSuffix: rawStringValue(rawLink.lastContentSuffix),
 		lastBodySections: readBodySections(rawLink.lastBodySections),
 		lastPhotoFiles: stringRecordValue(rawLink.lastPhotoFiles),
+	};
+}
+
+function readPendingJournalPush(requestID: string, rawPush: unknown): PendingJournalPush | null {
+	if (!isRecord(rawPush)) {
+		return null;
+	}
+	const id = stringValue(rawPush.requestID) || stringValue(requestID);
+	const path = stringValue(rawPush.path);
+	if (!id || !path) {
+		return null;
+	}
+
+	return {
+		requestID: id,
+		path: normalizePath(path),
+		title: stringValue(rawPush.title) || titleForFile(path),
+		existingJournalID: stringValue(rawPush.existingJournalID),
+		created: stringValue(rawPush.created),
+		createdKey: stringValue(rawPush.createdKey),
+		markdownHash: stringValue(rawPush.markdownHash),
+		journalHash: stringValue(rawPush.journalHash),
+		lastJournalCreated: stringValue(rawPush.lastJournalCreated),
+		lastJournalUpdated: stringValue(rawPush.lastJournalUpdated),
+		lastTemplateHash: stringValue(rawPush.lastTemplateHash),
+		lastTemplateSettingsHash: stringValue(rawPush.lastTemplateSettingsHash),
+		lastTemplatePropertyKeys: stringArrayValue(rawPush.lastTemplatePropertyKeys),
+		lastTemplateProperties: recordValue(rawPush.lastTemplateProperties),
+		lastAttachmentPropertyItems: readAttachmentPropertyItems(rawPush.lastAttachmentPropertyItems),
+		lastContentPrefix: rawStringValue(rawPush.lastContentPrefix),
+		lastContentSuffix: rawStringValue(rawPush.lastContentSuffix),
+		lastBodySections: readBodySections(rawPush.lastBodySections),
+		lastPhotoFiles: stringRecordValue(rawPush.lastPhotoFiles),
 	};
 }
 

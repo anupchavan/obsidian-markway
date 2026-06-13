@@ -14,6 +14,7 @@ export interface BridgeRequest {
 	includePhotoAttachments?: boolean;
 	includeAttachments?: boolean;
 	stripTitleHeading?: boolean;
+	createIfMissing?: boolean;
 	requestedAt: string;
 }
 
@@ -68,9 +69,10 @@ export class MarkwayBridgeClient {
 
 	async sendRequest(
 		request: Omit<BridgeRequest, "id" | "requestedAt">,
-		timeoutMs = 60_000
+		timeoutMs = 60_000,
+		requestID?: string
 	): Promise<BridgeResponse> {
-		const id = crypto.randomUUID().toUpperCase();
+		const id = requestID ?? crypto.randomUUID().toUpperCase();
 		const fullRequest: BridgeRequest = {
 			id,
 			requestedAt: new Date().toISOString(),
@@ -86,6 +88,25 @@ export class MarkwayBridgeClient {
 		} finally {
 			this.onRequestEnd();
 		}
+	}
+
+	async listResponseIDs(): Promise<string[]> {
+		await this.prepareDirectories();
+		return (await this.listFiles(this.responsesDir()))
+			.filter((path) => path.endsWith(".json"))
+			.map((path) => path.split("/").pop()?.replace(/\.json$/, "") ?? "")
+			.filter(Boolean);
+	}
+
+	async consumeResponse(id: string): Promise<BridgeResponse | null> {
+		await this.prepareDirectories();
+		const responsePath = normalizePath(`${this.responsesDir()}/${id}.json`);
+		if (!(await this.adapter.exists(responsePath))) {
+			return null;
+		}
+		const text = await this.adapter.read(responsePath);
+		await this.removeIfExists(responsePath);
+		return this.parseBridgeResponse(text, id);
 	}
 
 	bridgeRoot(): string {
@@ -150,13 +171,11 @@ export class MarkwayBridgeClient {
 	}
 
 	private async waitForResponse(id: string, timeoutMs: number): Promise<BridgeResponse> {
-		const responsePath = normalizePath(`${this.responsesDir()}/${id}.json`);
 		const started = Date.now();
 		while (Date.now() - started < timeoutMs) {
-			if (await this.adapter.exists(responsePath)) {
-				const text = await this.adapter.read(responsePath);
-				await this.removeIfExists(responsePath);
-				return this.parseBridgeResponse(text, id);
+			const response = await this.consumeResponse(id);
+			if (response) {
+				return response;
 			}
 			await sleep(350);
 		}

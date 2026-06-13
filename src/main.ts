@@ -69,6 +69,7 @@ import {
 	type JournalPhotoAttachment,
 	type MarkwayPluginData,
 	type MarkwaySettings,
+	type PendingJournalPush,
 	type SyncOptions,
 } from "./sync-utils";
 
@@ -126,6 +127,10 @@ function journalBodyForPush(body: string): string {
 	return body.replace(/\n+$/g, "");
 }
 
+function isMissingJournalEntryError(message: string): boolean {
+	return /\b(entry not found|not found|missing journal entry)\b/i.test(message);
+}
+
 function mergePushOptions(left: PushOptions | undefined, right: PushOptions): PushOptions {
 	return {
 		force: left?.force === true || right.force === true,
@@ -137,6 +142,7 @@ function mergePushOptions(left: PushOptions | undefined, right: PushOptions): Pu
 export default class MarkwayPlugin extends Plugin {
 	settings!: MarkwaySettings;
 	journalLinks: Record<string, JournalLink> = {};
+	pendingJournalPushes: Record<string, PendingJournalPush> = {};
 	private statusEl!: HTMLElement;
 	private bridge!: MarkwayBridgeClient;
 	private bridgeRequestsInFlight = 0;
@@ -174,6 +180,7 @@ export default class MarkwayPlugin extends Plugin {
 				this.bridgeRequestsInFlight = Math.max(0, this.bridgeRequestsInFlight - 1);
 			}
 		);
+		await this.reconcilePendingJournalPushResponses();
 
 		this.addSettingTab(new MarkwaySettingTab(this));
 		if (!this.settings.syncSetupComplete) {
@@ -214,12 +221,14 @@ export default class MarkwayPlugin extends Plugin {
 		const data = readPluginData(loaded);
 		this.settings = data.settings;
 		this.journalLinks = data.journalLinks;
+		this.pendingJournalPushes = data.pendingJournalPushes;
 	}
 
 	async savePluginData() {
 		const data: MarkwayPluginData = {
 			settings: this.settings,
 			journalLinks: this.journalLinks,
+			pendingJournalPushes: this.pendingJournalPushes,
 		};
 		await this.saveData(data);
 	}
@@ -328,7 +337,11 @@ export default class MarkwayPlugin extends Plugin {
 			if (!file) {
 				continue;
 			}
-			if (this.isObsidianTemplateFile(file) || (!this.linkForFile(file) && !this.fileMatchesJournalRules(file))) {
+			if (
+				this.isObsidianTemplateFile(file)
+				|| this.hasPendingJournalPushForPath(file.path)
+				|| (!this.linkForFile(file) && !this.fileMatchesJournalRules(file))
+			) {
 				continue;
 			}
 			await this.pushFile(file, { silent: true });
@@ -411,7 +424,12 @@ export default class MarkwayPlugin extends Plugin {
 		if (!(file instanceof TFile) || file.extension !== "md") {
 			return;
 		}
-		if (!this.canRunAutomaticSync() || this.isSuppressed(file.path) || this.isObsidianTemplateFile(file)) {
+		if (
+			!this.canRunAutomaticSync()
+			|| this.isSuppressed(file.path)
+			|| this.isObsidianTemplateFile(file)
+			|| this.hasPendingJournalPushForPath(file.path)
+		) {
 			return;
 		}
 		if (!this.linkForFile(file) && (!this.fileMatchesJournalRules(file) || this.hasEmptyTemplatedTitle(file))) {
@@ -589,49 +607,47 @@ export default class MarkwayPlugin extends Plugin {
 			}
 
 			const markdownHash = sha256Hex(markdown);
+			const requestID = crypto.randomUUID().toUpperCase();
+			this.pendingJournalPushes[requestID] = this.pendingJournalPushForRequest(
+				requestID,
+				file,
+				title,
+				link,
+				markdownHash,
+				journalHash,
+				createdUpdate
+			);
+			await this.savePluginData();
 			const result = await this.sendBridgeRequest({
 				kind: "journalPush",
 				relativePath: file.path,
 				journalID: link?.journalID,
 				title,
 				created: createdUpdate?.value,
+				createIfMissing: !link || !this.settings.deleteMarkdownFileWhenJournalDeleted,
 				// Send the extracted journal text; Markway.app must not push the
 				// raw file, which contains generated template sections.
 				body: journalBody,
 				stripTitleHeading: this.settings.journalIncludeTitleHeading,
-			});
+			}, 60_000, requestID);
 			if (!result.ok || !result.journalID) {
+				delete this.pendingJournalPushes[requestID];
+				if (link && this.settings.deleteMarkdownFileWhenJournalDeleted && isMissingJournalEntryError(result.message)) {
+					await this.deleteMarkdownFileForJournalLink(link);
+					delete this.journalLinks[link.journalID];
+					await this.savePluginData();
+					return;
+				}
+				await this.savePluginData();
 				throw new Error(result.message || "Markway app did not return a Journal ID.");
 			}
 
-			const lastTemplatePropertyKeys = [...(link?.lastTemplatePropertyKeys ?? [])];
-			const lastTemplateProperties = { ...(link?.lastTemplateProperties ?? {}) };
-			if (createdUpdate && !lastTemplatePropertyKeys.includes(createdUpdate.key)) {
-				lastTemplatePropertyKeys.push(createdUpdate.key);
+			const pendingPush = this.pendingJournalPushes[requestID];
+			if (!pendingPush) {
+				throw new Error(`Missing pending Journal push state for ${requestID}.`);
 			}
-			if (createdUpdate) {
-				lastTemplateProperties[createdUpdate.key] = createdUpdate.value;
-			}
-
-			this.journalLinks[result.journalID] = {
-				journalID: result.journalID,
-				path: file.path,
-				title,
-				lastSyncedAt: new Date().toISOString(),
-				lastJournalCreated: createdUpdate?.value ?? link?.lastJournalCreated ?? "",
-				lastMarkdownHash: markdownHash,
-				lastJournalHash: journalHash,
-				lastJournalUpdated: "",
-				lastTemplateHash: link?.lastTemplateHash ?? "",
-				lastTemplateSettingsHash: link?.lastTemplateSettingsHash ?? "",
-				lastTemplatePropertyKeys,
-				lastTemplateProperties,
-				lastAttachmentPropertyItems: link?.lastAttachmentPropertyItems ?? {},
-				lastContentPrefix: link?.lastContentPrefix ?? "",
-				lastContentSuffix: link?.lastContentSuffix ?? "",
-				lastBodySections: link?.lastBodySections ?? [],
-				lastPhotoFiles: link?.lastPhotoFiles ?? {},
-			};
+			this.applyCompletedJournalPush(pendingPush, result.journalID);
+			delete this.pendingJournalPushes[requestID];
 			this.recentLocalFileChanges.delete(normalizePath(file.path));
 			await this.savePluginData();
 
@@ -648,6 +664,139 @@ export default class MarkwayPlugin extends Plugin {
 		} finally {
 			this.bridgeRequestsInFlight = Math.max(0, this.bridgeRequestsInFlight - 1);
 		}
+	}
+
+	private pendingJournalPushForRequest(
+		requestID: string,
+		file: TFile,
+		title: string,
+		link: JournalLink | null,
+		markdownHash: string,
+		journalHash: string,
+		createdUpdate?: { key: string; value: string } | null
+	): PendingJournalPush {
+		const lastTemplatePropertyKeys = [...(link?.lastTemplatePropertyKeys ?? [])];
+		const lastTemplateProperties = { ...(link?.lastTemplateProperties ?? {}) };
+		if (createdUpdate && !lastTemplatePropertyKeys.includes(createdUpdate.key)) {
+			lastTemplatePropertyKeys.push(createdUpdate.key);
+		}
+		if (createdUpdate) {
+			lastTemplateProperties[createdUpdate.key] = createdUpdate.value;
+		}
+
+		return {
+			requestID,
+			path: file.path,
+			title,
+			existingJournalID: link?.journalID ?? "",
+			created: createdUpdate?.value ?? "",
+			createdKey: createdUpdate?.key ?? "",
+			markdownHash,
+			journalHash,
+			lastJournalCreated: link?.lastJournalCreated ?? "",
+			lastJournalUpdated: "",
+			lastTemplateHash: link?.lastTemplateHash ?? "",
+			lastTemplateSettingsHash: link?.lastTemplateSettingsHash ?? "",
+			lastTemplatePropertyKeys,
+			lastTemplateProperties,
+			lastAttachmentPropertyItems: link?.lastAttachmentPropertyItems ?? {},
+			lastContentPrefix: link?.lastContentPrefix ?? "",
+			lastContentSuffix: link?.lastContentSuffix ?? "",
+			lastBodySections: link?.lastBodySections ?? [],
+			lastPhotoFiles: link?.lastPhotoFiles ?? {},
+		};
+	}
+
+	private async reconcilePendingJournalPushResponses(): Promise<void> {
+		const responseIDs = await this.bridge.listResponseIDs();
+		let changed = false;
+		const repairPaths = new Set<string>();
+		for (const responseID of responseIDs) {
+			const pending = this.pendingJournalPushes[responseID];
+			if (!pending) {
+				continue;
+			}
+
+			let response: BridgeResponse | null = null;
+			try {
+				response = await this.bridge.consumeResponse(responseID);
+			} catch (error) {
+				this.logSilentError(`Markway could not recover pending push ${pending.path}`, error);
+			}
+			if (!response) {
+				continue;
+			}
+
+			delete this.pendingJournalPushes[responseID];
+			changed = true;
+			if (!response.ok) {
+				if (this.settings.deleteMarkdownFileWhenJournalDeleted && isMissingJournalEntryError(response.message)) {
+					await this.deleteMarkdownFileForPendingPush(pending);
+				}
+				continue;
+			}
+			if (!response.journalID) {
+				continue;
+			}
+
+			this.applyCompletedJournalPush(pending, response.journalID);
+			repairPaths.add(pending.path);
+		}
+
+		if (changed) {
+			await this.savePluginData();
+		}
+
+		for (const path of repairPaths) {
+			const file = this.fileForPath(path);
+			if (!file) {
+				continue;
+			}
+			const markdown = await this.app.vault.read(file);
+			const link = this.linkForFile(file);
+			if (link && this.journalCreatedDateForPush(file, markdown, link)) {
+				this.queueAutomaticPush(file);
+			}
+		}
+	}
+
+	private applyCompletedJournalPush(pending: PendingJournalPush, journalID: string): void {
+		if (pending.existingJournalID && pending.existingJournalID !== journalID) {
+			delete this.journalLinks[pending.existingJournalID];
+		}
+		this.journalLinks[journalID] = {
+			journalID,
+			path: pending.path,
+			title: pending.title,
+			lastSyncedAt: new Date().toISOString(),
+			lastJournalCreated: pending.created || pending.lastJournalCreated,
+			lastMarkdownHash: pending.markdownHash,
+			lastJournalHash: pending.journalHash,
+			lastJournalUpdated: pending.lastJournalUpdated,
+			lastTemplateHash: pending.lastTemplateHash,
+			lastTemplateSettingsHash: pending.lastTemplateSettingsHash,
+			lastTemplatePropertyKeys: pending.lastTemplatePropertyKeys,
+			lastTemplateProperties: pending.lastTemplateProperties,
+			lastAttachmentPropertyItems: pending.lastAttachmentPropertyItems,
+			lastContentPrefix: pending.lastContentPrefix,
+			lastContentSuffix: pending.lastContentSuffix,
+			lastBodySections: pending.lastBodySections,
+			lastPhotoFiles: pending.lastPhotoFiles,
+		};
+		this.recentLocalFileChanges.delete(normalizePath(pending.path));
+	}
+
+	private async deleteMarkdownFileForPendingPush(pending: PendingJournalPush): Promise<void> {
+		if (pending.existingJournalID) {
+			delete this.journalLinks[pending.existingJournalID];
+		}
+		const file = this.fileForPath(pending.path);
+		if (!file) {
+			return;
+		}
+		this.suppressFile(file.path);
+		await this.app.fileManager.trashFile(file);
+		this.setStatus(`Markway deleted ${file.path}`);
 	}
 
 	async pullFile(file: TFile) {
@@ -689,6 +838,7 @@ export default class MarkwayPlugin extends Plugin {
 			if (
 				this.isSuppressed(file.path)
 				|| this.isObsidianTemplateFile(file)
+				|| this.hasPendingJournalPushForPath(file.path)
 				|| this.linkForFile(file)
 				|| !this.fileMatchesJournalRules(file)
 			) {
@@ -1648,9 +1798,10 @@ export default class MarkwayPlugin extends Plugin {
 
 	private async sendBridgeRequest(
 		request: Omit<BridgeRequest, "id" | "requestedAt">,
-		timeoutMs = 60_000
+		timeoutMs = 60_000,
+		requestID?: string
 	): Promise<BridgeResponse> {
-		return await this.bridge.sendRequest(request, timeoutMs);
+		return await this.bridge.sendRequest(request, timeoutMs, requestID);
 	}
 
 	private async ensureFolder(folderPath: string) {
@@ -1720,6 +1871,11 @@ export default class MarkwayPlugin extends Plugin {
 	private linkForPath(path: string): JournalLink | null {
 		const normalized = normalizePath(path);
 		return Object.values(this.journalLinks).find((link) => link.path === normalized) ?? null;
+	}
+
+	private hasPendingJournalPushForPath(path: string): boolean {
+		const normalized = normalizePath(path);
+		return Object.values(this.pendingJournalPushes).some((pending) => pending.path === normalized);
 	}
 
 	private frontmatterJournalIDForFile(file: TFile): string | null {

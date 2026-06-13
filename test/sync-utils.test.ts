@@ -23,6 +23,7 @@ import {
 	obsidianTemplateFolderFromConfig,
 	preserveMarkdownStructure,
 	readJournalLinks,
+	readPendingJournalPushes,
 	readPluginData,
 	readSettings,
 	addedFrontmatterValues,
@@ -96,6 +97,7 @@ describe("settings defaults and parsing", () => {
 		expect(data.settings.syncSetupComplete).toBe(true);
 		expect(data.settings.debounceMs).toBe(500);
 		expect(data.settings.vaultPathOverride).toBe("/tmp/vault");
+		expect(data.pendingJournalPushes).toEqual({});
 	});
 
 	it("uses custom import folder fallback for default rules when rules are missing", () => {
@@ -303,6 +305,39 @@ describe("journal links", () => {
 				},
 			{ id: "A", status: "active", created: "", title: "Title" }
 		)).toBe(false);
+	});
+});
+
+describe("pending journal pushes", () => {
+	it("normalizes pending bridge push records", () => {
+		const pending = readPendingJournalPushes({
+			"REQUEST-ID": {
+				path: "Journal//Entry.md",
+				title: "",
+				existingJournalID: "OLD-ID",
+				created: "2026-06-13T13:01:00Z",
+				createdKey: "created",
+				markdownHash: "m",
+				journalHash: "j",
+				lastTemplatePropertyKeys: ["created"],
+				lastTemplateProperties: { created: "2026-06-13T13:01:00Z" },
+			},
+		});
+
+		expect(pending["REQUEST-ID"]).toMatchObject({
+			requestID: "REQUEST-ID",
+			path: "Journal/Entry.md",
+			title: "Entry",
+			existingJournalID: "OLD-ID",
+			created: "2026-06-13T13:01:00Z",
+			createdKey: "created",
+			markdownHash: "m",
+			journalHash: "j",
+			lastTemplatePropertyKeys: ["created"],
+			lastTemplateProperties: { created: "2026-06-13T13:01:00Z" },
+			lastBodySections: [],
+			lastPhotoFiles: {},
+		});
 	});
 });
 

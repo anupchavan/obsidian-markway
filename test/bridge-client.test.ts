@@ -101,6 +101,41 @@ describe("MarkwayBridgeClient", () => {
 		expect([...adapter.files.keys()].some((path) => path.includes("/responses/"))).toBe(false);
 	});
 
+	it("can queue a request with a caller supplied id", async () => {
+		const adapter = new MemoryAdapter((request, store) => {
+			writeResponse(store, {
+				id: request.id,
+				ok: true,
+				message: "ok",
+				completedAt: "2026-06-13T00:00:00Z",
+			});
+		});
+		const client = clientWith(adapter);
+
+		const response = await client.sendRequest({ kind: "doctor" }, 10, "PENDING-ID");
+
+		expect(response.id).toBe("PENDING-ID");
+		expect([...adapter.files.keys()].some((path) => path.endsWith("/requests/PENDING-ID.json"))).toBe(true);
+	});
+
+	it("lists and consumes completed responses left by a previous plugin session", async () => {
+		const adapter = new MemoryAdapter();
+		const client = clientWith(adapter);
+		writeResponse(adapter, {
+			id: "PENDING-ID",
+			ok: true,
+			message: "ok",
+			journalID: "JOURNAL-ID",
+			completedAt: "2026-06-13T00:00:00Z",
+		});
+
+		await expect(client.listResponseIDs()).resolves.toEqual(["PENDING-ID"]);
+		const response = await client.consumeResponse("PENDING-ID");
+
+		expect(response?.journalID).toBe("JOURNAL-ID");
+		await expect(client.consumeResponse("PENDING-ID")).resolves.toBeNull();
+	});
+
 	it("rejects a response file whose JSON id does not match the request", async () => {
 		const adapter = new MemoryAdapter((request, store) => {
 			store.files.set(
