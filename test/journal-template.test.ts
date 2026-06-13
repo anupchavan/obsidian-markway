@@ -7,6 +7,7 @@ import {
 	journalTemplateSettingsHash,
 	journalBodyContent,
 	journalCreatedDateFromNoteName,
+	journalNoteNameHasEmptyTitle,
 	journalTitleFromNoteName,
 	parseJournalBodySections,
 	renderJournalBodySections,
@@ -667,6 +668,20 @@ describe("note names", () => {
 		expect(journalTitleFromNoteName("Quick idea", NAME_TEMPLATE)).toBe("Quick idea");
 		expect(journalTitleFromNoteName("Quick idea", "{{title}}")).toBe("Quick idea");
 		expect(journalTitleFromNoteName("2026-06-11", "{{created|date:\"YYYY-MM-DD\"}}")).toBe("2026-06-11");
+	});
+
+	it("detects a templated note name whose title slot is still empty", () => {
+		expect(journalTitleFromNoteName("2026-06-13 1831", NAME_TEMPLATE)).toBe("");
+		expect(journalNoteNameHasEmptyTitle("2026-06-13 1831", NAME_TEMPLATE)).toBe(true);
+		expect(journalNoteNameHasEmptyTitle("2026-06-13 1831 checking stuff", NAME_TEMPLATE)).toBe(false);
+		expect(journalNoteNameHasEmptyTitle(
+			"2026-06-13 1831 -",
+			"{{created|date:\"YYYY-MM-DD HHmm\"}} - {{title}}"
+		)).toBe(true);
+		expect(journalNoteNameHasEmptyTitle(
+			"- 2026-06-13 1831",
+			"{{title}} - {{created|date:\"YYYY-MM-DD HHmm\"}}"
+		)).toBe(true);
 	});
 
 	it("recovers titles when literal backslashes were sanitized in filenames", () => {

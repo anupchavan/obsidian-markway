@@ -12,6 +12,7 @@ import {
 	hasMarkdownChangedSinceLastSync,
 	hasMatchingJournalSummary,
 	hasUnsyncedMarkdownContent,
+	isPathInObsidianTemplateFolder,
 	isFileExistsError,
 	mergeSyncOptions,
 	normalizeDebounceMs,
@@ -19,6 +20,7 @@ import {
 	normalizeJournalProperties,
 	normalizePath,
 	normalizeTemplatePropertyKey,
+	obsidianTemplateFolderFromConfig,
 	preserveMarkdownStructure,
 	readJournalLinks,
 	readPluginData,
@@ -160,6 +162,20 @@ describe("settings defaults and parsing", () => {
 		["bad", 1200],
 	] as const)("normalizes debounce %s", (input, expected) => {
 		expect(normalizeDebounceMs(input)).toBe(expected);
+	});
+});
+
+describe("Obsidian template file detection", () => {
+	it("reads the persisted Templates core plugin config", () => {
+		expect(obsidianTemplateFolderFromConfig({ folder: " /Templates// " })).toBe("Templates");
+		expect(obsidianTemplateFolderFromConfig({ template_folder: "Snippets" })).toBe("Snippets");
+	});
+
+	it("matches only files inside the configured Templates folder", () => {
+		expect(isPathInObsidianTemplateFolder("Templates/Meditation Template.md", "Templates")).toBe(true);
+		expect(isPathInObsidianTemplateFolder("Templates/Nested/Journal.md", "Templates")).toBe(true);
+		expect(isPathInObsidianTemplateFolder("Templates.md", "Templates")).toBe(false);
+		expect(isPathInObsidianTemplateFolder("Journal/Templates/Meditation.md", "Templates")).toBe(false);
 	});
 });
 

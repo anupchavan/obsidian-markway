@@ -16,6 +16,7 @@ import {
 	isEmptyFrontmatterValue,
 	journalBodyContent,
 	journalCreatedDateFromNoteName,
+	journalNoteNameHasEmptyTitle,
 	journalTemplateNeedsAttachmentMetadata,
 	journalTemplateNeedsAttachments,
 	journalTitleFromNoteName,
@@ -48,6 +49,7 @@ import {
 	mergeSyncOptions,
 	normalizeFolder,
 	normalizePath,
+	obsidianTemplateFolderFromConfig,
 	preserveMarkdownStructure,
 	readPluginData,
 	removedGeneratedAttachmentIDs,
@@ -58,6 +60,7 @@ import {
 	splitMarkdown,
 	titleForFile,
 	vaultPathKey,
+	isPathInObsidianTemplateFolder,
 	type GeneratedAttachmentPropertyItem,
 	type JournalBodySection,
 	type JournalEntrySummary,
@@ -94,6 +97,10 @@ interface PushOptions {
 	linkedOnly?: boolean;
 }
 
+interface QueuedPush {
+	timer: number;
+}
+
 function comparableDateValue(value: string): string {
 	const parsed = Date.parse(value);
 	return Number.isFinite(parsed) ? new Date(parsed).toISOString() : value.trim();
@@ -119,6 +126,14 @@ function journalBodyForPush(body: string): string {
 	return body.replace(/\n+$/g, "");
 }
 
+function mergePushOptions(left: PushOptions | undefined, right: PushOptions): PushOptions {
+	return {
+		force: left?.force === true || right.force === true,
+		silent: left ? left.silent === true && right.silent === true : right.silent === true,
+		linkedOnly: left ? left.linkedOnly === true && right.linkedOnly === true : right.linkedOnly === true,
+	};
+}
+
 export default class MarkwayPlugin extends Plugin {
 	settings!: MarkwaySettings;
 	journalLinks: Record<string, JournalLink> = {};
@@ -129,7 +144,9 @@ export default class MarkwayPlugin extends Plugin {
 	private queuedJournalSync: SyncOptions | null = null;
 	private journalSyncTimer: number | null = null;
 	private templateRefreshTimer: number | null = null;
-	private syncTimers = new Map<string, number>();
+	private syncTimers = new Map<string, QueuedPush>();
+	private pushesInFlight = new Map<string, Promise<void>>();
+	private queuedPushesAfterInFlight = new Map<string, PushOptions>();
 	private journalSettingsSyncPauseDepth = 0;
 	private journalSettingsResumeTimer: number | null = null;
 	private pausedJournalSync: SyncOptions | null = null;
@@ -137,9 +154,11 @@ export default class MarkwayPlugin extends Plugin {
 	private pausedPushPaths = new Set<string>();
 	private suppressedFilePaths = new Map<string, number>();
 	private recentLocalFileChanges = new Map<string, number>();
+	private obsidianTemplateFolder: string | null = null;
 
 	async onload() {
 		await this.loadPluginData();
+		await this.refreshObsidianTemplateFolder();
 
 		this.statusEl = this.addStatusBarItem();
 		this.setStatus("Markway idle");
@@ -172,7 +191,7 @@ export default class MarkwayPlugin extends Plugin {
 
 	onunload() {
 		for (const timer of this.syncTimers.values()) {
-			window.clearTimeout(timer);
+			window.clearTimeout(timer.timer);
 		}
 		this.syncTimers.clear();
 		if (this.journalSyncTimer) {
@@ -300,6 +319,7 @@ export default class MarkwayPlugin extends Plugin {
 		scanVault: boolean,
 		pushPaths: Set<string>
 	) {
+		await this.refreshObsidianTemplateFolder();
 		if (scanVault) {
 			await this.syncExistingVaultFiles({ silent: true });
 		}
@@ -308,7 +328,7 @@ export default class MarkwayPlugin extends Plugin {
 			if (!file) {
 				continue;
 			}
-			if (!this.linkForFile(file) && !this.fileMatchesJournalRules(file)) {
+			if (this.isObsidianTemplateFile(file) || (!this.linkForFile(file) && !this.fileMatchesJournalRules(file))) {
 				continue;
 			}
 			await this.pushFile(file, { silent: true });
@@ -325,7 +345,12 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private handleCreateOrModify(file: TAbstractFile) {
-		if (file instanceof TFile && file.extension === "md" && !this.isSuppressed(file.path)) {
+		if (
+			file instanceof TFile
+			&& file.extension === "md"
+			&& !this.isSuppressed(file.path)
+			&& !this.isObsidianTemplateFile(file)
+		) {
 			this.recentLocalFileChanges.set(normalizePath(file.path), Date.now());
 		}
 		this.queueAutomaticPush(file);
@@ -386,29 +411,40 @@ export default class MarkwayPlugin extends Plugin {
 		if (!(file instanceof TFile) || file.extension !== "md") {
 			return;
 		}
-		if (!this.canRunAutomaticSync() || this.isSuppressed(file.path)) {
+		if (!this.canRunAutomaticSync() || this.isSuppressed(file.path) || this.isObsidianTemplateFile(file)) {
 			return;
 		}
-		if (!this.linkForFile(file) && !this.fileMatchesJournalRules(file)) {
+		if (!this.linkForFile(file) && (!this.fileMatchesJournalRules(file) || this.hasEmptyTemplatedTitle(file))) {
 			return;
 		}
 		if (this.queueFilePushUntilJournalSettingsClose(file)) {
 			return;
 		}
 
-		const existingTimer = this.syncTimers.get(file.path);
+		const path = normalizePath(file.path);
+		const existingTimer = this.syncTimers.get(path);
 		if (existingTimer) {
-			window.clearTimeout(existingTimer);
+			window.clearTimeout(existingTimer.timer);
 		}
 
 		const timer = window.setTimeout(() => {
-			this.syncTimers.delete(file.path);
-			if (this.queueFilePushUntilJournalSettingsClose(file)) {
+			this.syncTimers.delete(path);
+			const currentFile = this.fileForPath(path);
+			if (!currentFile || this.isSuppressed(path) || this.isObsidianTemplateFile(currentFile)) {
 				return;
 			}
-			void this.pushFile(file, { silent: true });
+			if (
+				!this.linkForFile(currentFile)
+				&& (!this.fileMatchesJournalRules(currentFile) || this.hasEmptyTemplatedTitle(currentFile))
+			) {
+				return;
+			}
+			if (this.queueFilePushUntilJournalSettingsClose(currentFile)) {
+				return;
+			}
+			void this.pushFile(currentFile, { silent: true });
 		}, Math.max(250, this.settings.debounceMs));
-		this.syncTimers.set(file.path, timer);
+		this.syncTimers.set(path, { timer });
 	}
 
 	private handleRename(file: TAbstractFile, oldPath: string) {
@@ -416,6 +452,8 @@ export default class MarkwayPlugin extends Plugin {
 			return;
 		}
 
+		this.cancelQueuedPush(oldPath);
+		this.moveRecentLocalChange(oldPath, file.path);
 		const link = this.linkForPath(oldPath);
 		if (!link) {
 			this.queueAutomaticPush(file);
@@ -427,7 +465,7 @@ export default class MarkwayPlugin extends Plugin {
 		link.path = file.path;
 		link.title = this.journalTitleForFile(file.path);
 		void this.savePluginData();
-		if (this.canRunAutomaticSync() && this.fileMatchesJournalRules(file)) {
+		if (this.canRunAutomaticSync() && !this.isObsidianTemplateFile(file) && this.fileMatchesJournalRules(file)) {
 			if (this.queueFilePushUntilJournalSettingsClose(file)) {
 				return;
 			}
@@ -436,7 +474,12 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private handleDelete(file: TAbstractFile) {
-		if (!(file instanceof TFile) || file.extension !== "md" || this.isSuppressed(file.path)) {
+		if (
+			!(file instanceof TFile)
+			|| file.extension !== "md"
+			|| this.isSuppressed(file.path)
+			|| this.isObsidianTemplateFile(file)
+		) {
 			return;
 		}
 		if (!this.canRunAutomaticSync() || this.isJournalSettingsSyncPaused()) {
@@ -491,8 +534,41 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	async pushFile(file: TFile, options: PushOptions = {}) {
+		const path = normalizePath(file.path);
+		const inFlight = this.pushesInFlight.get(path);
+		if (inFlight) {
+			this.queuedPushesAfterInFlight.set(
+				path,
+				mergePushOptions(this.queuedPushesAfterInFlight.get(path), options)
+			);
+			await inFlight;
+			return;
+		}
+
+		const push = this.pushFileNow(file, options).finally(async () => {
+			this.pushesInFlight.delete(path);
+			const queued = this.queuedPushesAfterInFlight.get(path);
+			this.queuedPushesAfterInFlight.delete(path);
+			if (!queued) {
+				return;
+			}
+			const currentFile = this.fileForPath(path);
+			if (currentFile) {
+				await this.pushFile(currentFile, queued);
+			}
+		});
+		this.pushesInFlight.set(path, push);
+		await push;
+	}
+
+	private async pushFileNow(file: TFile, options: PushOptions = {}) {
 		this.bridgeRequestsInFlight += 1;
 		try {
+			await this.refreshObsidianTemplateFolder();
+			if (this.isObsidianTemplateFile(file)) {
+				this.setStatus(`Markway skipped Obsidian template ${file.path}`);
+				return;
+			}
 			await this.migrateFrontmatterLink(file);
 			const link = this.linkForFile(file);
 			if (options.linkedOnly && !link) {
@@ -576,6 +652,10 @@ export default class MarkwayPlugin extends Plugin {
 
 	async pullFile(file: TFile) {
 		try {
+			await this.refreshObsidianTemplateFolder();
+			if (this.isObsidianTemplateFile(file)) {
+				throw new Error(`${file.path} is an Obsidian template file and is excluded from Journal sync.`);
+			}
 			await this.migrateFrontmatterLink(file);
 			const link = this.linkForFile(file);
 			if (!link) {
@@ -600,12 +680,18 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private async syncExistingVaultFiles(options: { silent?: boolean } = {}) {
+		await this.refreshObsidianTemplateFolder();
 		const files = [...this.app.vault.getMarkdownFiles()].sort((left, right) => left.path.localeCompare(right.path));
 		let pushed = 0;
 		let skipped = 0;
 
 		for (const file of files) {
-			if (this.isSuppressed(file.path) || this.linkForFile(file) || !this.fileMatchesJournalRules(file)) {
+			if (
+				this.isSuppressed(file.path)
+				|| this.isObsidianTemplateFile(file)
+				|| this.linkForFile(file)
+				|| !this.fileMatchesJournalRules(file)
+			) {
 				skipped += 1;
 				continue;
 			}
@@ -630,6 +716,7 @@ export default class MarkwayPlugin extends Plugin {
 
 		this.journalSyncInProgress = true;
 		try {
+			await this.refreshObsidianTemplateFolder();
 			if (options.migrateFrontmatter) {
 				await this.migrateVaultFrontmatterLinks();
 			}
@@ -650,6 +737,10 @@ export default class MarkwayPlugin extends Plugin {
 				}
 
 				const existing = this.journalLinks[summary.id];
+				if (existing && this.isObsidianTemplatePath(existing.path)) {
+					skipped += 1;
+					continue;
+				}
 				if (!existing && !options.includeNew) {
 					skipped += 1;
 					continue;
@@ -1061,11 +1152,11 @@ export default class MarkwayPlugin extends Plugin {
 
 	private async hasUnsyncedLocalChanges(link: JournalLink): Promise<boolean> {
 		const file = this.fileForPath(link.path);
-		if (!file) {
+		if (!file || this.isObsidianTemplateFile(file)) {
 			return false;
 		}
 
-		if (this.syncTimers.has(file.path) || this.isRecentlyLocallyChanged(file.path)) {
+		if (this.syncTimers.has(normalizePath(file.path)) || this.isRecentlyLocallyChanged(file.path)) {
 			return true;
 		}
 
@@ -1079,7 +1170,7 @@ export default class MarkwayPlugin extends Plugin {
 			return false;
 		}
 		const file = this.fileForPath(link.path);
-		if (!file) {
+		if (!file || this.isObsidianTemplateFile(file)) {
 			return false;
 		}
 
@@ -1425,6 +1516,9 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private async migrateFrontmatterLink(file: TFile) {
+		if (this.isObsidianTemplateFile(file)) {
+			return;
+		}
 		const journalID = this.frontmatterJournalIDForFile(file);
 		if (!journalID) {
 			return;
@@ -1467,8 +1561,9 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private async migrateVaultFrontmatterLinks() {
+		await this.refreshObsidianTemplateFolder();
 		for (const file of this.app.vault.getMarkdownFiles()) {
-			if (this.frontmatterJournalIDForFile(file)) {
+			if (!this.isObsidianTemplateFile(file) && this.frontmatterJournalIDForFile(file)) {
 				await this.migrateFrontmatterLink(file);
 			}
 		}
@@ -1633,9 +1728,37 @@ export default class MarkwayPlugin extends Plugin {
 		return typeof value === "string" && value.trim() ? value.trim() : null;
 	}
 
+	private async refreshObsidianTemplateFolder(): Promise<void> {
+		const configPath = normalizePath(`${this.app.vault.configDir}/templates.json`);
+		try {
+			const exists = await this.app.vault.adapter.exists(configPath);
+			if (!exists) {
+				this.obsidianTemplateFolder = null;
+				return;
+			}
+			const raw = await this.app.vault.adapter.read(configPath);
+			const parsed: unknown = JSON.parse(raw);
+			this.obsidianTemplateFolder = obsidianTemplateFolderFromConfig(parsed);
+		} catch {
+			this.obsidianTemplateFolder = null;
+		}
+	}
+
+	private isObsidianTemplateFile(file: TFile): boolean {
+		return this.isObsidianTemplatePath(file.path);
+	}
+
+	private isObsidianTemplatePath(path: string): boolean {
+		return isPathInObsidianTemplateFolder(path, this.obsidianTemplateFolder);
+	}
+
 	private fileMatchesJournalRules(file: TFile): boolean {
 		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
 		return checkRules(this.app, this.settings.journalRules, file, frontmatter);
+	}
+
+	private hasEmptyTemplatedTitle(file: TFile): boolean {
+		return journalNoteNameHasEmptyTitle(titleForFile(file.path), this.settings.journalNoteNameTemplate);
 	}
 
 	private frontmatterForFile(file: TFile): Record<string, unknown> {
@@ -1678,6 +1801,26 @@ export default class MarkwayPlugin extends Plugin {
 	private fileForPath(path: string): TFile | null {
 		const abstractFile = this.app.vault.getAbstractFileByPath(normalizePath(path));
 		return abstractFile instanceof TFile ? abstractFile : null;
+	}
+
+	private cancelQueuedPush(path: string): void {
+		const normalized = normalizePath(path);
+		const queued = this.syncTimers.get(normalized);
+		if (!queued) {
+			return;
+		}
+		window.clearTimeout(queued.timer);
+		this.syncTimers.delete(normalized);
+	}
+
+	private moveRecentLocalChange(oldPath: string, newPath: string): void {
+		const oldNormalized = normalizePath(oldPath);
+		const changedAt = this.recentLocalFileChanges.get(oldNormalized);
+		if (!changedAt) {
+			return;
+		}
+		this.recentLocalFileChanges.delete(oldNormalized);
+		this.recentLocalFileChanges.set(normalizePath(newPath), changedAt);
 	}
 
 	private suppressFile(path: string) {

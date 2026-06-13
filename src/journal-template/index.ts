@@ -296,9 +296,23 @@ export function renderJournalNoteName(
 /// lazily. Without a {{title}} slot (or on mismatch) the whole name is the
 /// title.
 export function journalTitleFromNoteName(name: string, template: string): string {
+	const match = journalTitleMatchFromNoteName(name, template);
+	if (match.hasTitleSlot && match.matched) {
+		return match.title;
+	}
+	return name;
+}
+
+export interface JournalNoteNameTitleMatch {
+	hasTitleSlot: boolean;
+	matched: boolean;
+	title: string;
+}
+
+export function journalTitleMatchFromNoteName(name: string, template: string): JournalNoteNameTitleMatch {
 	const trimmed = template.trim();
 	if (!trimmed || trimmed === "{{title}}") {
-		return name;
+		return { hasTitleSlot: true, matched: true, title: name };
 	}
 
 	let pattern = "";
@@ -320,10 +334,21 @@ export function journalTitleFromNoteName(name: string, template: string): string
 	pattern += noteNameLiteralPattern(trimmed.slice(lastIndex));
 
 	if (!hasTitleGroup) {
-		return name;
+		return { hasTitleSlot: false, matched: false, title: name };
 	}
 	const result = new RegExp(`^${pattern}$`).exec(name);
-	return result?.[1]?.trim() || name;
+	if (result?.[1] !== undefined) {
+		return { hasTitleSlot: true, matched: true, title: result[1].trim() };
+	}
+	if (noteNameMatchesEmptyTitle(name, trimmed)) {
+		return { hasTitleSlot: true, matched: true, title: "" };
+	}
+	return { hasTitleSlot: true, matched: false, title: name };
+}
+
+export function journalNoteNameHasEmptyTitle(name: string, template: string): boolean {
+	const match = journalTitleMatchFromNoteName(name, template);
+	return match.hasTitleSlot && match.matched && !match.title.trim();
 }
 
 export interface JournalNoteNameDate {
@@ -412,6 +437,113 @@ function noteNameVariablePattern(filters: string[]): string {
 		}
 	}
 	return ".*?";
+}
+
+type NoteNamePatternPiece =
+	| { kind: "literal"; value: string }
+	| { kind: "pattern"; value: string };
+
+function noteNameMatchesEmptyTitle(name: string, template: string): boolean {
+	const pattern = noteNamePatternWithoutTitle(template);
+	return pattern === null ? false : new RegExp(`^${pattern}$`).test(name);
+}
+
+function noteNamePatternWithoutTitle(template: string): string | null {
+	const pieces: NoteNamePatternPiece[] = [];
+	let lastIndex = 0;
+	let hasTitle = false;
+	for (const match of template.matchAll(/\{\{([\s\S]*?)\}\}/g)) {
+		addLiteralPatternPiece(pieces, template.slice(lastIndex, match.index ?? 0));
+		const expression = (match[1] ?? "").trim();
+		const segments = expression.split("|");
+		const root = segments[0]?.trim() ?? "";
+		if (root === "title" || root === "entry.title") {
+			hasTitle = true;
+		} else if (root === "created" || root === "entry.created") {
+			const format = dateFilterFormat(segments.slice(1));
+			if (!format) {
+				return null;
+			}
+			pieces.push({ kind: "pattern", value: dateFormatPattern(format) });
+		} else {
+			pieces.push({ kind: "pattern", value: noteNameVariablePattern(segments.slice(1)) });
+		}
+		lastIndex = (match.index ?? 0) + match[0].length;
+	}
+	addLiteralPatternPiece(pieces, template.slice(lastIndex));
+
+	if (!hasTitle) {
+		return null;
+	}
+
+	return noteNamePatternFromPieces(normalizeEmptyTitlePatternPieces(pieces));
+}
+
+function addLiteralPatternPiece(pieces: NoteNamePatternPiece[], value: string): void {
+	if (!value) {
+		return;
+	}
+	const previous = pieces[pieces.length - 1];
+	if (previous?.kind === "literal") {
+		previous.value += value;
+	} else {
+		pieces.push({ kind: "literal", value });
+	}
+}
+
+function normalizeEmptyTitlePatternPieces(pieces: NoteNamePatternPiece[]): NoteNamePatternPiece[] {
+	const normalized: NoteNamePatternPiece[] = [];
+	for (const piece of pieces) {
+		if (piece.kind === "literal") {
+			addLiteralPatternPiece(normalized, piece.value);
+		} else {
+			normalized.push(piece);
+		}
+	}
+
+	while (normalized[0]?.kind === "literal") {
+		normalized[0].value = normalized[0].value.trimStart();
+		if (normalized[0].value) {
+			break;
+		}
+		normalized.shift();
+	}
+	while (normalized[normalized.length - 1]?.kind === "literal") {
+		const last = normalized[normalized.length - 1];
+		if (!last || last.kind !== "literal") {
+			break;
+		}
+		last.value = last.value.trimEnd();
+		if (last.value) {
+			break;
+		}
+		normalized.pop();
+	}
+	return normalized;
+}
+
+function noteNamePatternFromPieces(pieces: NoteNamePatternPiece[]): string {
+	return pieces.map((piece) =>
+		piece.kind === "literal" ? noteNameFlexibleLiteralPattern(piece.value) : piece.value
+	).join("");
+}
+
+function noteNameFlexibleLiteralPattern(value: string): string {
+	let pattern = "";
+	let index = 0;
+	while (index < value.length) {
+		const character = value[index] ?? "";
+		if (/\s/.test(character)) {
+			while (index < value.length && /\s/.test(value[index] ?? "")) {
+				index += 1;
+			}
+			pattern += "\\s+";
+			continue;
+		}
+		pattern += noteNameLiteralPattern(character);
+		index += 1;
+	}
+	return pattern;
 }
 
 function dateFilterFormat(filters: string[]): string | null {
