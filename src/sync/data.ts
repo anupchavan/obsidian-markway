@@ -32,6 +32,7 @@ export const DEFAULT_SETTINGS: MarkwaySettings = defaultMarkwaySettings();
 export function defaultMarkwaySettings(journalFolder = DEFAULT_JOURNAL_FOLDER): MarkwaySettings {
 	return {
 		automaticSync: true,
+		syncSetupComplete: false,
 		debounceMs: DEFAULT_DEBOUNCE_MS,
 		vaultPathOverride: "",
 		journalFolder: normalizeFolder(journalFolder) || DEFAULT_JOURNAL_FOLDER,
@@ -55,10 +56,13 @@ export function readPluginData(value: unknown): MarkwayPluginData {
 	const rawSettings = isRecord(value.settings) ? value.settings : value;
 	const parsedSettings = readSettings(rawSettings);
 	const defaults = defaultMarkwaySettings(parsedSettings.journalFolder ?? DEFAULT_JOURNAL_FOLDER);
+	const syncSetupComplete =
+		typeof parsedSettings.syncSetupComplete === "boolean" ? parsedSettings.syncSetupComplete : true;
 	return {
 		settings: {
 			...defaults,
 			...parsedSettings,
+			syncSetupComplete,
 			journalRules: parsedSettings.journalRules ?? defaults.journalRules,
 		},
 		journalLinks: readJournalLinks(value.journalLinks),
@@ -90,6 +94,9 @@ export function readSettings(value: unknown): Partial<MarkwaySettings> {
 		settings.automaticSync = value.automaticSync;
 	} else if (value.autoScan === true) {
 		settings.automaticSync = true;
+	}
+	if (typeof value.syncSetupComplete === "boolean") {
+		settings.syncSetupComplete = value.syncSetupComplete;
 	}
 	if (typeof value.debounceMs === "number" || typeof value.debounceMs === "string") {
 		settings.debounceMs = normalizeDebounceMs(value.debounceMs);

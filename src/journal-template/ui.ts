@@ -32,7 +32,7 @@ export function renderJournalTemplateSettings(
 				key: "",
 				value: "{{title}}",
 			});
-			await plugin.savePluginData();
+			await plugin.saveSettingsFromUI({ refreshJournal: true });
 			onTemplateChanged();
 			onRefresh();
 		})();
@@ -82,7 +82,7 @@ export function renderJournalNoteNameControl(
 		text.inputEl.addEventListener("change", () => {
 			void (async () => {
 				plugin.settings.journalNoteNameTemplate = text.inputEl.value;
-				await plugin.savePluginData();
+				await plugin.saveSettingsFromUI({ refreshJournal: true });
 				renderWarnings();
 				onTemplateChanged();
 			})();
@@ -113,7 +113,7 @@ export function renderJournalContentTemplateControl(
 		textArea.inputEl.addEventListener("change", () => {
 			void (async () => {
 				plugin.settings.journalContentTemplate = textArea.inputEl.value;
-				await plugin.savePluginData();
+				await plugin.saveSettingsFromUI({ refreshJournal: true });
 				renderWarnings();
 				onTemplateChanged();
 			})();
@@ -174,7 +174,7 @@ function renderJournalPropertyKeyControl(
 				const value = normalizeTemplatePropertyKey(raw);
 				setValue(value);
 				text.inputEl.value = value;
-				await plugin.savePluginData();
+				await plugin.saveSettingsFromUI({ refreshJournal: true });
 				onTemplateChanged();
 			})();
 		};
@@ -238,7 +238,7 @@ function renderPropertyRow(
 		void (async () => {
 			property.key = normalizeTemplatePropertyKey(keyInput.value);
 			keyInput.value = property.key;
-			await plugin.savePluginData();
+			await plugin.saveSettingsFromUI({ refreshJournal: true });
 			onTemplateChanged();
 			onRefresh();
 		})();
@@ -258,7 +258,7 @@ function renderPropertyRow(
 	valueInput.addEventListener("change", () => {
 		void (async () => {
 			property.value = valueInput.value;
-			await plugin.savePluginData();
+			await plugin.saveSettingsFromUI({ refreshJournal: true });
 			onTemplateChanged();
 			onRefresh();
 		})();

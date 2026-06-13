@@ -2,6 +2,7 @@ import type { FilterGroup } from "../rules";
 
 export interface MarkwaySettings {
 	automaticSync: boolean;
+	syncSetupComplete: boolean;
 	debounceMs: number;
 	vaultPathOverride: string;
 	journalFolder: string;

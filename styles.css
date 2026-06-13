@@ -9,6 +9,10 @@
     display: block;
 }
 
+.mw-hidden-setting {
+    display: none;
+}
+
 .mw-rules-setting .setting-item-info,
 .mw-rules-setting .setting-item-control,
 .mw-template-setting .setting-item-info,

@@ -130,6 +130,11 @@ export default class MarkwayPlugin extends Plugin {
 	private journalSyncTimer: number | null = null;
 	private templateRefreshTimer: number | null = null;
 	private syncTimers = new Map<string, number>();
+	private journalSettingsSyncPauseDepth = 0;
+	private journalSettingsResumeTimer: number | null = null;
+	private pausedJournalSync: SyncOptions | null = null;
+	private pausedVaultScanNeeded = false;
+	private pausedPushPaths = new Set<string>();
 	private suppressedFilePaths = new Map<string, number>();
 	private recentLocalFileChanges = new Map<string, number>();
 
@@ -152,11 +157,14 @@ export default class MarkwayPlugin extends Plugin {
 		);
 
 		this.addSettingTab(new MarkwaySettingTab(this));
+		if (!this.settings.syncSetupComplete) {
+			new Notice("Markway is installed. Open settings to set up journal sync.", 12000);
+		}
 		this.app.workspace.onLayoutReady(() => {
 			this.registerVaultEvents();
 			void this.registerBridgeEventWatcher();
-			if (this.settings.automaticSync) {
-				void this.syncJournal({ includeNew: false, silent: true });
+			if (this.canRunAutomaticSync()) {
+				void this.syncVaultAndJournal({ includeNew: false, silent: true });
 			}
 		});
 		registerMarkwayCommands(this);
@@ -175,6 +183,10 @@ export default class MarkwayPlugin extends Plugin {
 			window.clearTimeout(this.templateRefreshTimer);
 			this.templateRefreshTimer = null;
 		}
+		if (this.journalSettingsResumeTimer) {
+			window.clearTimeout(this.journalSettingsResumeTimer);
+			this.journalSettingsResumeTimer = null;
+		}
 		this.bridge?.close();
 	}
 
@@ -191,6 +203,117 @@ export default class MarkwayPlugin extends Plugin {
 			journalLinks: this.journalLinks,
 		};
 		await this.saveData(data);
+	}
+
+	async saveSettingsFromUI(options: { scanVault?: boolean; refreshJournal?: boolean } = {}) {
+		const wasIncomplete = !this.settings.syncSetupComplete;
+		this.settings.syncSetupComplete = true;
+		await this.savePluginData();
+		if (wasIncomplete || options.scanVault || options.refreshJournal) {
+			this.queueSettingsChangedSync({
+				includeNew: false,
+				silent: true,
+			}, wasIncomplete || options.scanVault === true);
+		}
+	}
+
+	beginJournalSettingsSyncPause() {
+		if (this.journalSettingsResumeTimer) {
+			window.clearTimeout(this.journalSettingsResumeTimer);
+			this.journalSettingsResumeTimer = null;
+		}
+		this.journalSettingsSyncPauseDepth += 1;
+	}
+
+	endJournalSettingsSyncPause() {
+		this.journalSettingsSyncPauseDepth = Math.max(0, this.journalSettingsSyncPauseDepth - 1);
+		if (this.journalSettingsSyncPauseDepth > 0) {
+			return;
+		}
+		if (this.journalSettingsResumeTimer) {
+			window.clearTimeout(this.journalSettingsResumeTimer);
+		}
+		this.journalSettingsResumeTimer = window.setTimeout(() => {
+			this.journalSettingsResumeTimer = null;
+			if (this.journalSettingsSyncPauseDepth === 0) {
+				this.flushJournalSettingsSyncQueue();
+			}
+		}, 0);
+	}
+
+	private flushJournalSettingsSyncQueue() {
+		const queued = this.pausedJournalSync;
+		const scanVault = this.pausedVaultScanNeeded;
+		const pushPaths = new Set(this.pausedPushPaths);
+		this.pausedJournalSync = null;
+		this.pausedVaultScanNeeded = false;
+		this.pausedPushPaths.clear();
+		if ((!queued && !scanVault && !pushPaths.size) || !this.canRunAutomaticSync()) {
+			return;
+		}
+
+		void this.flushJournalSettingsPausedSync(queued ?? { includeNew: false, silent: true }, scanVault, pushPaths);
+	}
+
+	private canRunAutomaticSync(): boolean {
+		return this.settings.automaticSync && this.settings.syncSetupComplete;
+	}
+
+	private isJournalSettingsSyncPaused(): boolean {
+		return this.journalSettingsSyncPauseDepth > 0;
+	}
+
+	private queueSettingsChangedSync(options: SyncOptions, scanVault: boolean) {
+		if (!this.canRunAutomaticSync()) {
+			return;
+		}
+		if (this.queueSyncUntilJournalSettingsClose(options, scanVault)) {
+			return;
+		}
+		if (scanVault) {
+			void this.syncVaultAndJournal(options);
+		} else {
+			void this.syncJournal(options);
+		}
+	}
+
+	private queueSyncUntilJournalSettingsClose(options: SyncOptions, scanVault: boolean): boolean {
+		if (!this.isJournalSettingsSyncPaused()) {
+			return false;
+		}
+		this.pausedJournalSync = mergeSyncOptions(this.pausedJournalSync, options);
+		this.pausedVaultScanNeeded = this.pausedVaultScanNeeded || scanVault;
+		return true;
+	}
+
+	private queueFilePushUntilJournalSettingsClose(file: TFile): boolean {
+		if (!this.isJournalSettingsSyncPaused()) {
+			return false;
+		}
+		this.pausedPushPaths.add(normalizePath(file.path));
+		this.pausedJournalSync = mergeSyncOptions(this.pausedJournalSync, { includeNew: false, silent: true });
+		return true;
+	}
+
+	private async flushJournalSettingsPausedSync(
+		options: SyncOptions,
+		scanVault: boolean,
+		pushPaths: Set<string>
+	) {
+		if (scanVault) {
+			await this.syncExistingVaultFiles({ silent: true });
+		}
+		for (const path of [...pushPaths].sort()) {
+			const file = this.fileForPath(path);
+			if (!file) {
+				continue;
+			}
+			if (!this.linkForFile(file) && !this.fileMatchesJournalRules(file)) {
+				continue;
+			}
+			await this.pushFile(file, { silent: true });
+		}
+		await this.syncJournal(options);
 	}
 
 	private registerVaultEvents() {
@@ -213,7 +336,10 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private queueAutomaticJournalPull() {
-		if (!this.settings.automaticSync) {
+		if (!this.canRunAutomaticSync()) {
+			return;
+		}
+		if (this.queueSyncUntilJournalSettingsClose({ includeNew: true, silent: true }, false)) {
 			return;
 		}
 
@@ -228,12 +354,18 @@ export default class MarkwayPlugin extends Plugin {
 				this.queueAutomaticJournalPull();
 				return;
 			}
+			if (this.queueSyncUntilJournalSettingsClose({ includeNew: true, silent: true }, false)) {
+				return;
+			}
 			void this.syncJournal({ includeNew: true, silent: true });
 		}, delay);
 	}
 
 	queueTemplateRefresh() {
-		if (!this.settings.automaticSync) {
+		if (!this.canRunAutomaticSync()) {
+			return;
+		}
+		if (this.queueSyncUntilJournalSettingsClose({ includeNew: false, silent: true }, false)) {
 			return;
 		}
 
@@ -243,6 +375,9 @@ export default class MarkwayPlugin extends Plugin {
 
 		this.templateRefreshTimer = window.setTimeout(() => {
 			this.templateRefreshTimer = null;
+			if (this.queueSyncUntilJournalSettingsClose({ includeNew: false, silent: true }, false)) {
+				return;
+			}
 			void this.syncJournal({ includeNew: false, silent: true });
 		}, Math.max(1200, this.settings.debounceMs));
 	}
@@ -251,10 +386,13 @@ export default class MarkwayPlugin extends Plugin {
 		if (!(file instanceof TFile) || file.extension !== "md") {
 			return;
 		}
-		if (!this.settings.automaticSync || this.isSuppressed(file.path)) {
+		if (!this.canRunAutomaticSync() || this.isSuppressed(file.path)) {
 			return;
 		}
 		if (!this.linkForFile(file) && !this.fileMatchesJournalRules(file)) {
+			return;
+		}
+		if (this.queueFilePushUntilJournalSettingsClose(file)) {
 			return;
 		}
 
@@ -265,6 +403,9 @@ export default class MarkwayPlugin extends Plugin {
 
 		const timer = window.setTimeout(() => {
 			this.syncTimers.delete(file.path);
+			if (this.queueFilePushUntilJournalSettingsClose(file)) {
+				return;
+			}
 			void this.pushFile(file, { silent: true });
 		}, Math.max(250, this.settings.debounceMs));
 		this.syncTimers.set(file.path, timer);
@@ -286,13 +427,19 @@ export default class MarkwayPlugin extends Plugin {
 		link.path = file.path;
 		link.title = this.journalTitleForFile(file.path);
 		void this.savePluginData();
-		if (this.settings.automaticSync && this.fileMatchesJournalRules(file)) {
+		if (this.canRunAutomaticSync() && this.fileMatchesJournalRules(file)) {
+			if (this.queueFilePushUntilJournalSettingsClose(file)) {
+				return;
+			}
 			void this.pushFile(file, { force: true, linkedOnly: true, silent: true });
 		}
 	}
 
 	private handleDelete(file: TAbstractFile) {
 		if (!(file instanceof TFile) || file.extension !== "md" || this.isSuppressed(file.path)) {
+			return;
+		}
+		if (!this.canRunAutomaticSync() || this.isJournalSettingsSyncPaused()) {
 			return;
 		}
 
@@ -444,7 +591,38 @@ export default class MarkwayPlugin extends Plugin {
 		}
 	}
 
+	async syncVaultAndJournal(options: SyncOptions) {
+		if (this.queueSyncUntilJournalSettingsClose(options, true)) {
+			return;
+		}
+		await this.syncExistingVaultFiles({ silent: true });
+		await this.syncJournal(options);
+	}
+
+	private async syncExistingVaultFiles(options: { silent?: boolean } = {}) {
+		const files = [...this.app.vault.getMarkdownFiles()].sort((left, right) => left.path.localeCompare(right.path));
+		let pushed = 0;
+		let skipped = 0;
+
+		for (const file of files) {
+			if (this.isSuppressed(file.path) || this.linkForFile(file) || !this.fileMatchesJournalRules(file)) {
+				skipped += 1;
+				continue;
+			}
+			await this.pushFile(file, { silent: true });
+			pushed += 1;
+		}
+
+		this.setStatus(`Markway scanned vault: ${pushed} pushed, ${skipped} skipped`);
+		if (!options.silent && pushed > 0) {
+			new Notice(`Markway pushed ${pushed} existing ${pushed === 1 ? "note" : "notes"}`);
+		}
+	}
+
 	async syncJournal(options: SyncOptions) {
+		if (this.queueSyncUntilJournalSettingsClose(options, false)) {
+			return;
+		}
 		if (this.journalSyncInProgress) {
 			this.queuedJournalSync = mergeSyncOptions(this.queuedJournalSync, options);
 			return;
@@ -910,7 +1088,7 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private queuePushForLink(link: JournalLink) {
-		if (!this.settings.automaticSync) {
+		if (!this.canRunAutomaticSync()) {
 			return;
 		}
 

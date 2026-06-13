@@ -14,11 +14,9 @@ import {
 	normalizeDebounceMs,
 	normalizeFolder,
 	validateDebounceValue,
-	type MarkwaySettings,
 } from "../sync-utils";
+import { journalFolderSettingDefinition, type MarkwaySettingKey } from "./definitions";
 import { renderLegacyGeneralSettings, renderLegacyJournalSettings } from "./legacy";
-
-type MarkwaySettingKey = keyof MarkwaySettings;
 
 export class MarkwaySettingTab extends PluginSettingTab {
 	constructor(private plugin: MarkwayPlugin) {
@@ -72,25 +70,27 @@ export class MarkwaySettingTab extends PluginSettingTab {
 				break;
 			case "journalIncludeTitleHeading":
 				this.plugin.settings.journalIncludeTitleHeading = value === true;
-				this.plugin.queueTemplateRefresh();
 				break;
 		}
-		await this.plugin.savePluginData();
+		await this.plugin.saveSettingsFromUI({
+			scanVault: key === "automaticSync" || key === "journalFolder",
+			refreshJournal: key === "journalIncludeTitleHeading",
+		});
 	}
 
-		display(): void {
-			this.renderLegacySettings();
-		}
+	display(): void {
+		this.renderLegacySettings();
+	}
 
-		private renderLegacySettings(): void {
-			const { containerEl } = this;
-			containerEl.empty();
-			renderLegacyGeneralSettings(containerEl, this.plugin);
-			new Setting(containerEl).setName("Journal").setHeading();
-			renderLegacyJournalSettings(containerEl, this.plugin, () => {
-				this.renderLegacySettings();
-			});
-		}
+	private renderLegacySettings(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+		renderLegacyGeneralSettings(containerEl, this.plugin);
+		new Setting(containerEl).setName("Journal").setHeading();
+		renderLegacyJournalSettings(containerEl, this.plugin, () => {
+			this.renderLegacySettings();
+		});
+	}
 
 	private generalItems(): SettingDefinitionItem<MarkwaySettingKey>[] {
 		return [
@@ -125,15 +125,8 @@ export class MarkwaySettingTab extends PluginSettingTab {
 
 	private journalItems(): SettingDefinitionItem<MarkwaySettingKey>[] {
 		return [
-			{
-				name: "Journal folder",
-				desc: "Folder to use when importing Journal entries that are not already linked.",
-				control: {
-					type: "text",
-					key: "journalFolder",
-					placeholder: "Journal",
-				},
-			},
+			this.journalSyncPauseItem(),
+			journalFolderSettingDefinition(),
 			this.rulesItem(),
 			{
 				name: "Sync Journal deletes",
@@ -153,14 +146,24 @@ export class MarkwaySettingTab extends PluginSettingTab {
 		];
 	}
 
+	private journalSyncPauseItem(): SettingDefinitionItem<MarkwaySettingKey> {
+		return {
+			name: "Journal settings sync pause",
+			searchable: false,
+			render: (setting) => {
+				setting.settingEl.addClass("mw-hidden-setting");
+				this.plugin.beginJournalSettingsSyncPause();
+				return () => this.plugin.endJournalSettingsSyncPause();
+			},
+		};
+	}
+
 	private noteNameItem(): SettingDefinitionItem<MarkwaySettingKey> {
 		return {
 			name: "Note name",
 			desc: "Format for the file name of the entry. You can use variables like {{title}} and {{created}} to pre-populate data from the entry.",
 			render: (setting) => {
-				renderJournalNoteNameControl(setting, this.plugin, () => {
-					this.plugin.queueTemplateRefresh();
-				});
+				renderJournalNoteNameControl(setting, this.plugin);
 			},
 		};
 	}
@@ -170,9 +173,7 @@ export class MarkwaySettingTab extends PluginSettingTab {
 			name: "Note content",
 			desc: "Template for the note body when pulling entries. {{content}} is the journal entry text.",
 			render: (setting) => {
-				renderJournalContentTemplateControl(setting, this.plugin, () => {
-					this.plugin.queueTemplateRefresh();
-				});
+				renderJournalContentTemplateControl(setting, this.plugin);
 			},
 		};
 	}
@@ -182,9 +183,7 @@ export class MarkwaySettingTab extends PluginSettingTab {
 			name: "Photos property",
 			desc: "Markway downloads journal photos into your attachment folder and lists them in this property. Remove a value to delete that journal photo, or add an image or video from your vault to attach it. Leave empty to disable.",
 			render: (setting) => {
-				renderJournalPhotosPropertyControl(setting, this.plugin, () => {
-					this.plugin.queueTemplateRefresh();
-				});
+				renderJournalPhotosPropertyControl(setting, this.plugin);
 			},
 		};
 	}
@@ -194,9 +193,7 @@ export class MarkwaySettingTab extends PluginSettingTab {
 			name: "Created property",
 			desc: "Frontmatter property to read when pushing the journal created date. Edit it in Obsidian to update the journal entry date. Leave empty to disable.",
 			render: (setting) => {
-				renderJournalCreatedPropertyControl(setting, this.plugin, () => {
-					this.plugin.queueTemplateRefresh();
-				});
+				renderJournalCreatedPropertyControl(setting, this.plugin);
 			},
 		};
 	}
@@ -214,7 +211,7 @@ export class MarkwaySettingTab extends PluginSettingTab {
 					this.plugin.app,
 					this.plugin.settings.journalRules,
 					async () => {
-						await this.plugin.savePluginData();
+						await this.plugin.saveSettingsFromUI({ scanVault: true, refreshJournal: true });
 					},
 					this.plugin.journalImportFolder()
 				);
@@ -235,11 +232,10 @@ export class MarkwaySettingTab extends PluginSettingTab {
 						key: "",
 						value: "{{title}}",
 					});
-						void this.plugin.savePluginData();
-						this.plugin.queueTemplateRefresh();
-						this.refreshDeclarativeSettings();
-					},
+					void this.plugin.saveSettingsFromUI({ refreshJournal: true });
+					this.refreshDeclarativeSettings();
 				},
+			},
 			onReorder: (oldIndex, newIndex) => {
 				void this.reorderProperty(oldIndex, newIndex);
 			},
@@ -253,12 +249,9 @@ export class MarkwaySettingTab extends PluginSettingTab {
 					renderJournalTemplatePropertyRow(
 						setting,
 						this.plugin,
-							property,
-							() => {
-								this.refreshDeclarativeSettings();
-							},
+						property,
 						() => {
-							this.plugin.queueTemplateRefresh();
+							this.refreshDeclarativeSettings();
 						}
 					);
 				},
@@ -273,21 +266,19 @@ export class MarkwaySettingTab extends PluginSettingTab {
 			return;
 		}
 		properties.splice(newIndex, 0, moved);
-			await this.plugin.savePluginData();
-			this.plugin.queueTemplateRefresh();
-			this.refreshDeclarativeSettings();
-		}
+		await this.plugin.saveSettingsFromUI({ refreshJournal: true });
+		this.refreshDeclarativeSettings();
+	}
 
-		private async deleteProperty(index: number): Promise<void> {
-			this.plugin.settings.journalProperties.splice(index, 1);
-			await this.plugin.savePluginData();
-			this.plugin.queueTemplateRefresh();
-			this.refreshDeclarativeSettings();
-		}
+	private async deleteProperty(index: number): Promise<void> {
+		this.plugin.settings.journalProperties.splice(index, 1);
+		await this.plugin.saveSettingsFromUI({ refreshJournal: true });
+		this.refreshDeclarativeSettings();
+	}
 
-		private refreshDeclarativeSettings(): void {
-			if (requireApiVersion("1.13.0")) {
-				this.update();
-			}
+	private refreshDeclarativeSettings(): void {
+		if (requireApiVersion("1.13.0")) {
+			this.update();
 		}
 	}
+}

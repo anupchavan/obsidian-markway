@@ -18,7 +18,7 @@ export function renderLegacyJournalSettings(
 				.setValue(plugin.settings.journalFolder)
 				.onChange(async (value) => {
 					plugin.settings.journalFolder = normalizeFolder(value);
-					await plugin.savePluginData();
+					await plugin.saveSettingsFromUI({ scanVault: true, refreshJournal: true });
 				})
 		);
 
@@ -33,7 +33,7 @@ export function renderLegacyJournalSettings(
 		plugin.app,
 		plugin.settings.journalRules,
 		async () => {
-			await plugin.savePluginData();
+			await plugin.saveSettingsFromUI({ scanVault: true, refreshJournal: true });
 		},
 		plugin.journalImportFolder()
 	);
@@ -46,7 +46,7 @@ export function renderLegacyJournalSettings(
 				.setValue(plugin.settings.deleteJournalEntryWhenFileDeleted)
 				.onChange(async (value) => {
 					plugin.settings.deleteJournalEntryWhenFileDeleted = value;
-					await plugin.savePluginData();
+					await plugin.saveSettingsFromUI();
 				})
 		);
 
@@ -58,14 +58,12 @@ export function renderLegacyJournalSettings(
 				.setValue(plugin.settings.deleteMarkdownFileWhenJournalDeleted)
 				.onChange(async (value) => {
 					plugin.settings.deleteMarkdownFileWhenJournalDeleted = value;
-					await plugin.savePluginData();
+					await plugin.saveSettingsFromUI();
 				})
-		);
+	);
 
 	new Setting(containerEl).setName("Content").setHeading();
-	renderJournalTemplateSettings(containerEl, plugin, onRefresh, () => {
-		plugin.queueTemplateRefresh();
-	});
+	renderJournalTemplateSettings(containerEl, plugin, onRefresh);
 }
 
 export function renderLegacyGeneralSettings(containerEl: HTMLElement, plugin: MarkwayPlugin): void {
@@ -78,7 +76,7 @@ export function renderLegacyGeneralSettings(containerEl: HTMLElement, plugin: Ma
 				.setValue(plugin.settings.automaticSync)
 				.onChange(async (value) => {
 					plugin.settings.automaticSync = value;
-					await plugin.savePluginData();
+					await plugin.saveSettingsFromUI({ scanVault: true, refreshJournal: true });
 				})
 		);
 
@@ -91,7 +89,7 @@ export function renderLegacyGeneralSettings(containerEl: HTMLElement, plugin: Ma
 				.setValue(String(plugin.settings.debounceMs))
 				.onChange(async (value) => {
 					plugin.settings.debounceMs = normalizeDebounceMs(value);
-					await plugin.savePluginData();
+					await plugin.saveSettingsFromUI();
 				})
 		);
 
@@ -104,7 +102,7 @@ export function renderLegacyGeneralSettings(containerEl: HTMLElement, plugin: Ma
 				.setValue(plugin.settings.vaultPathOverride)
 				.onChange(async (value) => {
 					plugin.settings.vaultPathOverride = value.trim();
-					await plugin.savePluginData();
+					await plugin.saveSettingsFromUI();
 				})
 		);
 }

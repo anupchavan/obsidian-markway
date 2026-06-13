@@ -22,7 +22,7 @@ export function registerMarkwayCommands(plugin: MarkwayPlugin): void {
 		id: "sync-now",
 		name: "Sync journal now",
 		callback: () => {
-			void plugin.syncJournal({ includeNew: true, migrateFrontmatter: true });
+			void plugin.syncVaultAndJournal({ includeNew: true, migrateFrontmatter: true });
 		},
 	});
 

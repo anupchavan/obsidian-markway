@@ -280,7 +280,7 @@ class JournalRulesBuilder {
 		if (!group.conditions.length) {
 			const rowWrapper = statementsContainer.createDiv({ cls: "mw-filter-row" });
 			rowWrapper.createSpan({ cls: "mw-conjunction", text: "Where" });
-			this.renderFilterRow(rowWrapper, this.defaultFilter(), group, -1, true, false);
+			this.renderFilterRow(rowWrapper, this.defaultFilter(), group, -1, true);
 		} else {
 			group.conditions.forEach((condition, index) => {
 				const rowWrapper = statementsContainer.createDiv({ cls: "mw-filter-row" });

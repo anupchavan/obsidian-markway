@@ -44,6 +44,10 @@ describe("settings defaults and parsing", () => {
 		expect(defaultMarkwaySettings().automaticSync).toBe(true);
 	});
 
+	it("keeps first-install sync setup incomplete by default", () => {
+		expect(defaultMarkwaySettings().syncSetupComplete).toBe(false);
+	});
+
 	it("keeps delete propagation disabled by default", () => {
 		const settings = defaultMarkwaySettings();
 		expect(settings.deleteJournalEntryWhenFileDeleted).toBe(false);
@@ -65,18 +69,29 @@ describe("settings defaults and parsing", () => {
 	});
 
 	it("returns defaults for invalid plugin data", () => {
-		expect(readPluginData(null).settings.journalFolder).toBe("Journal");
+		const data = readPluginData(null);
+		expect(data.settings.journalFolder).toBe("Journal");
+		expect(data.settings.syncSetupComplete).toBe(false);
 	});
 
 	it("reads nested plugin data", () => {
 		const data = readPluginData({ settings: { automaticSync: false, journalFolder: "Diary" }, journalLinks: {} });
 		expect(data.settings.automaticSync).toBe(false);
 		expect(data.settings.journalFolder).toBe("Diary");
+		expect(data.settings.syncSetupComplete).toBe(true);
+	});
+
+	it("preserves explicit sync setup state", () => {
+		expect(readPluginData({ settings: { syncSetupComplete: false }, journalLinks: {} }).settings.syncSetupComplete)
+			.toBe(false);
+		expect(readPluginData({ settings: { syncSetupComplete: true }, journalLinks: {} }).settings.syncSetupComplete)
+			.toBe(true);
 	});
 
 	it("keeps legacy flat settings compatible", () => {
 		const data = readPluginData({ autoScan: true, debounceMs: 500, vaultPathOverride: " /tmp/vault " });
 		expect(data.settings.automaticSync).toBe(true);
+		expect(data.settings.syncSetupComplete).toBe(true);
 		expect(data.settings.debounceMs).toBe(500);
 		expect(data.settings.vaultPathOverride).toBe("/tmp/vault");
 	});
