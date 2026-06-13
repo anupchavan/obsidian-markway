@@ -1,4 +1,5 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { parseJsonValue, valueToString } from "./types";
+
 export const first = (str: string): string => {
 	// Return empty string as-is without attempting to parse
 	if (str === '') {
@@ -6,9 +7,9 @@ export const first = (str: string): string => {
 	}
 
 	try {
-		const array = JSON.parse(str);
+		const array = parseJsonValue(str);
 		if (Array.isArray(array) && array.length > 0) {
-			return array[0].toString();
+			return valueToString(array[0]);
 		}
 	} catch (error) {
 		console.error('Error parsing JSON in first filter:', error);

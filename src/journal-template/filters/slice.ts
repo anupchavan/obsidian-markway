@@ -1,4 +1,4 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { parseJsonValue, valueToString } from "./types";
 import type { ParamValidationResult } from './types';
 
 export const validateSliceParams = (param: string | undefined): ParamValidationResult => {
@@ -37,9 +37,9 @@ export const slice = (str: string, param?: string): string => {
 		return isNaN(num) ? undefined : num;
 	});
 
-	let value;
+	let value: unknown;
 	try {
-		value = JSON.parse(str);
+		value = parseJsonValue(str);
 	} catch (error) {
 		// Only log error for non-trivial parse failures (not plain strings)
 		if (str.startsWith('[') || str.startsWith('{')) {
@@ -51,7 +51,7 @@ export const slice = (str: string, param?: string): string => {
 	if (Array.isArray(value)) {
 		const slicedArray = value.slice(start, end);
 		if (slicedArray.length === 1) {
-			return slicedArray[0].toString();
+			return valueToString(slicedArray[0]);
 		}
 		return JSON.stringify(slicedArray);
 	} else {

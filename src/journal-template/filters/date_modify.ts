@@ -1,5 +1,5 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
 import dayjs from 'dayjs';
+import type { ManipulateType } from "dayjs";
 import isoWeek from "dayjs/plugin/isoWeek";
 import weekOfYear from "dayjs/plugin/weekOfYear";
 import customParseFormat from 'dayjs/plugin/customParseFormat';
@@ -11,7 +11,16 @@ dayjs.extend(isoWeek);
 dayjs.extend(weekOfYear);
 dayjs.extend(advancedFormat);
 
-const validUnits = ['year', 'years', 'month', 'months', 'week', 'weeks', 'day', 'days', 'hour', 'hours', 'minute', 'minutes', 'second', 'seconds'];
+const validUnits = ['year', 'years', 'month', 'months', 'week', 'weeks', 'day', 'days', 'hour', 'hours', 'minute', 'minutes', 'second', 'seconds'] as const;
+const manipulateUnits: Record<string, ManipulateType> = {
+	year: "year",
+	month: "month",
+	week: "week",
+	day: "day",
+	hour: "hour",
+	minute: "minute",
+	second: "second",
+};
 
 export const validateDateModifyParams = (param: string | undefined): ParamValidationResult => {
 	if (!param) {
@@ -29,7 +38,10 @@ export const validateDateModifyParams = (param: string | undefined): ParamValida
 		return { valid: false, error: 'invalid format. Use "+1 day", "-2 weeks", etc.' };
 	}
 
-	const [, , , unit] = match;
+	const unit = match[3];
+	if (!unit) {
+		return { valid: false, error: 'invalid format. Use "+1 day", "-2 weeks", etc.' };
+	}
 	const normalizedUnit = unit.toLowerCase().replace(/s$/, '');
 
 	if (!validUnits.some(u => u.replace(/s$/, '') === normalizedUnit)) {
@@ -71,13 +83,24 @@ export const date_modify = (str: string, param?: string): string => {
 		return str;
 	}
 
-	const [, operation, amount, unit] = match;
+	const operation = match[1];
+	const amount = match[2];
+	const unit = match[3];
+	if (!operation || !amount || !unit) {
+		console.error('Invalid format for date_modify filter:', param);
+		return str;
+	}
 	const numericAmount = parseInt(amount, 10);
+	const manipulateUnit = manipulateUnits[unit.toLowerCase().replace(/s$/, '')];
+	if (!manipulateUnit) {
+		console.error('Invalid unit for date_modify filter:', unit);
+		return str;
+	}
 
 	if (operation === '+') {
-		date = date.add(numericAmount, unit as any);
+		date = date.add(numericAmount, manipulateUnit);
 	} else {
-		date = date.subtract(numericAmount, unit as any);
+		date = date.subtract(numericAmount, manipulateUnit);
 	}
 
 	return date.format('YYYY-MM-DD');

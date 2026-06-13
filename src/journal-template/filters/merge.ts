@@ -1,21 +1,20 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { isUnknownArray, parseJsonValue } from "./types";
+
 export const merge = (str: string, param?: string): string => {
 	// Return early if input is empty or invalid
 	if (!str || str === 'undefined' || str === 'null') {
 		return '[]';
 	}
 
-	let array;
+	let parsed: unknown;
 	try {
-		array = JSON.parse(str);
+		parsed = parseJsonValue(str);
 	} catch (error) {
 		console.error('Error parsing JSON in merge filter:', error);
 		return str;
 	}
 
-	if (!Array.isArray(array)) {
-		array = [str];
-	}
+	const array = isUnknownArray(parsed) ? parsed : [str];
 
 	if (!param) {
 		return JSON.stringify(array);
@@ -27,7 +26,7 @@ export const merge = (str: string, param?: string): string => {
 	try {
 		// Split the parameter by commas, but not within quotes
 		const additionalItems = param.match(/(?:[^,"']+|"[^"]*"|'[^']*')+/g) || [];
-		
+
 		// Process each item to remove quotes
 		const processedItems = additionalItems.map(item => {
 			item = item.trim();
@@ -39,4 +38,4 @@ export const merge = (str: string, param?: string): string => {
 		console.error('Error processing parameters in merge filter:', error);
 		return JSON.stringify(array);
 	}
-}; 
+};

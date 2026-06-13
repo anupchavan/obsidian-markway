@@ -1,4 +1,5 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { isFilterRecord, parseJsonValue, valueToString } from "./types";
+
 export const wikilink = (str: string, param?: string): string => {
 	if (!str.trim()) {
 		return str;
@@ -13,29 +14,30 @@ export const wikilink = (str: string, param?: string): string => {
 	}
 
 	try {
-		const data = JSON.parse(str);
+		const data = parseJsonValue(str);
 		
-		const processObject = (obj: any): string[] => {
+		const processObject = (obj: Record<string, unknown>): string[] => {
 			return Object.entries(obj).map(([key, value]) => {
-				if (typeof value === 'object' && value !== null) {
+				if (isFilterRecord(value)) {
 					return processObject(value);
 				}
-				return `[[${key}|${value}]]`;
+				return `[[${key}|${valueToString(value)}]]`;
 			}).flat();
 		};
 
 		if (Array.isArray(data)) {
 			const result = data.flatMap(item => {
-				if (typeof item === 'object' && item !== null) {
+				if (isFilterRecord(item)) {
 					return processObject(item);
 				}
-				return item ? (alias ? `[[${item}|${alias}]]` : `[[${item}]]`) : '';
+				const page = valueToString(item);
+				return page ? (alias ? `[[${page}|${alias}]]` : `[[${page}]]`) : '';
 			});
 			return JSON.stringify(result);
-		} else if (typeof data === 'object' && data !== null) {
+		} else if (isFilterRecord(data)) {
 			return JSON.stringify(processObject(data));
 		}
-	} catch (error) {
+	} catch {
 		// If parsing fails, treat it as a single string
 		return alias ? `[[${str}|${alias}]]` : `[[${str}]]`;
 	}

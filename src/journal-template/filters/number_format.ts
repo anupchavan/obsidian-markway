@@ -1,19 +1,20 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { isFilterRecord, parseJsonOr, stringifyFilterValue } from "./types";
+
 export const number_format = (input: string, param?: string): string => {
 	const formatNumber = (num: number, decimals: number, decPoint: string, thousandsSep: string): string => {
 		const parts = num.toFixed(decimals).split('.');
-		parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, thousandsSep);
+		parts[0] = (parts[0] ?? "").replace(/\B(?=(\d{3})+(?!\d))/g, thousandsSep);
 		return parts.join(decPoint);
 	};
 
-	const processValue = (value: any, decimals: number, decPoint: string, thousandsSep: string): any => {
+	const processValue = (value: unknown, decimals: number, decPoint: string, thousandsSep: string): unknown => {
 		if (typeof value === 'number' || (typeof value === 'string' && !isNaN(parseFloat(value)))) {
 			const num = typeof value === 'string' ? parseFloat(value) : value;
 			return formatNumber(num, decimals, decPoint, thousandsSep);
 		} else if (Array.isArray(value)) {
 			return value.map(item => processValue(item, decimals, decPoint, thousandsSep));
-		} else if (typeof value === 'object' && value !== null) {
-			const result: {[key: string]: any} = {};
+		} else if (isFilterRecord(value)) {
+			const result: Record<string, unknown> = {};
 			for (const [key, val] of Object.entries(value)) {
 				result[key] = processValue(val, decimals, decPoint, thousandsSep);
 			}
@@ -64,23 +65,16 @@ export const number_format = (input: string, param?: string): string => {
 				params.push(current.trim());
 			}
 
-			if (params.length >= 1) decimals = parseInt(params[0], 10);
-			if (params.length >= 2) decPoint = unescapeString(params[1].replace(/^["'](.*)["']$/, '$1'));
-			if (params.length >= 3) thousandsSep = unescapeString(params[2].replace(/^["'](.*)["']$/, '$1'));
+			if (params.length >= 1) decimals = parseInt(params[0] ?? "", 10);
+			if (params.length >= 2) decPoint = unescapeString((params[1] ?? "").replace(/^["'](.*)["']$/, '$1'));
+			if (params.length >= 3) thousandsSep = unescapeString((params[2] ?? "").replace(/^["'](.*)["']$/, '$1'));
 		}
 
 		if (isNaN(decimals)) decimals = 0;
 
-		let parsedInput: any;
-		try {
-			parsedInput = JSON.parse(input);
-		} catch {
-			// If JSON parsing fails, treat input as a single value
-			parsedInput = input;
-		}
-
+		const parsedInput = parseJsonOr(input, input);
 		const result = processValue(parsedInput, decimals, decPoint, thousandsSep);
-		return typeof result === 'string' ? result : JSON.stringify(result);
+		return stringifyFilterValue(result);
 	} catch (error) {
 		console.error('Error in number_format filter:', error);
 		return input; // Return original input if any unexpected error occurs

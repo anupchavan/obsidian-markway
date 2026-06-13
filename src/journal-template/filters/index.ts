@@ -1,7 +1,6 @@
-// Filter registry. Every filter implementation in this directory is copied
-// directly from obsidian-clipper src/utils/filters @ 372d420 with only debug
-// logging and import paths adjusted. Do not hand-roll new filters here; copy
-// them from that pinned commit instead.
+// Filter registry. These filters started from obsidian-clipper
+// src/utils/filters @ 372d420 and are kept behavior-compatible while satisfying
+// Obsidian plugin review's strict TypeScript lint checks.
 import { blockquote } from "./blockquote";
 import { calc } from "./calc";
 import { callout } from "./callout";

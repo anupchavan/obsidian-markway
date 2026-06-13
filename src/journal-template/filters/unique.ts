@@ -1,7 +1,8 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { isFilterRecord, parseJsonValue } from "./types";
+
 export const unique = (input: string): string => {
 	try {
-		const parsed = JSON.parse(input);
+		const parsed = parseJsonValue(input);
 
 		if (Array.isArray(parsed)) {
 			// For arrays of primitives, use Set
@@ -24,7 +25,7 @@ export const unique = (input: string): string => {
 		}
 
 		// For objects, remove duplicate values while keeping the last occurrence's key
-		if (typeof parsed === 'object' && parsed !== null) {
+		if (isFilterRecord(parsed)) {
 			const reverseEntries = Object.entries(parsed).reverse();
 			const seen = new Set();
 			const uniqueEntries = reverseEntries.filter(([_, value]) => {
@@ -45,4 +46,4 @@ export const unique = (input: string): string => {
 		// If parsing fails, return unchanged
 		return input;
 	}
-}; 
+};

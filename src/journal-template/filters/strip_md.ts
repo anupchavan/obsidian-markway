@@ -1,11 +1,10 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
 export const strip_md = (str: string): string => {
-		// Remove images first
-		str = str.replace(/!\[([^\]]*)\]\([^\)]+\)/g, '');
-		str = str.replace(/!\[\[([^\]]+)\]\]/g, '');
+			// Remove images first
+			str = str.replace(/!\[([^\]]*)]\([^)]+\)/g, '');
+			str = str.replace(/!\[\[([^\]]+)\]\]/g, '');
 
-		// Remove links, but keep the text
-		str = str.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+			// Remove links, but keep the text
+			str = str.replace(/\[([^\]]+)]\([^)]+\)/g, '$1');
 
 		// Remove any remaining URL-like strings
 		str = str.replace(/https?:\/\/\S+/g, '');
@@ -28,7 +27,7 @@ export const strip_md = (str: string): string => {
 		str = str.replace(/\[\s*\]/g, '');  // empty square brackets
 		str = str.replace(/\[\^[^\]]+\]/g, '');  // footnote references
 		str = str.replace(/^\*\[[^\]]+\]:.+$/gm, '');  // abbreviations
-		str = str.replace(/\[\[([^\]|]+)\|?([^\]]*)\]\]/g, (match, p1, p2) => p2 || p1);  // wikilinks
+			str = str.replace(/\[\[([^\]|]+)\|?([^\]]*)\]\]/g, (_match: string, p1: string, p2: string) => p2 || p1);  // wikilinks
 
 		// Final cleanup
 		str = str.replace(/\n{3,}/g, '\n\n');  // Multiple newlines

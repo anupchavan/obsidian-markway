@@ -1,13 +1,14 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { parseJsonValue, valueToString } from "./types";
+
 export const join = (str: string, param?: string): string => {
 	// Return early if input is empty or invalid
 	if (!str || str === 'undefined' || str === 'null') {
 		return '';
 	}
 
-	let array;
+	let array: unknown;
 	try {
-		array = JSON.parse(str);
+		array = parseJsonValue(str);
 	} catch (error) {
 		console.error('Error parsing JSON in join filter:', error);
 		return str;
@@ -25,5 +26,5 @@ export const join = (str: string, param?: string): string => {
 		separator = separator.replace(/\\n/g, '\n');
 	}
 
-	return array.join(separator);
+	return array.map(valueToString).join(separator);
 };

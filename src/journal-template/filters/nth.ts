@@ -1,4 +1,4 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { parseJsonValue } from "./types";
 import type { ParamValidationResult } from './types';
 
 export const validateNthParams = (param: string | undefined): ParamValidationResult => {
@@ -10,6 +10,9 @@ export const validateNthParams = (param: string | undefined): ParamValidationRes
 	// Check for basis pattern (e.g., "1,2,3:7")
 	if (param.includes(':')) {
 		const [positions, basis] = param.split(':').map(p => p.trim());
+		if (!positions || !basis) {
+			return { valid: false, error: 'invalid basis syntax. Use positions and basis (e.g., nth:1,2,3:7)' };
+		}
 		const nthValues = positions.split(',').map(n => parseInt(n.trim(), 10));
 		const basisSize = parseInt(basis, 10);
 
@@ -49,7 +52,7 @@ export const nth = (str: string, params?: string): string => {
 	}
 
 	try {
-		const data = JSON.parse(str);
+		const data = parseJsonValue(str);
 		if (!Array.isArray(data)) {
 			return str;
 		}
@@ -62,6 +65,10 @@ export const nth = (str: string, params?: string): string => {
 		// Check if we have a basis pattern (e.g., "1,2,3:7")
 		if (params.includes(':')) {
 			const [positions, basis] = params.split(':').map(p => p.trim());
+			if (!positions || !basis) {
+				console.error('Invalid nth filter basis syntax:', params);
+				return str;
+			}
 			const nthValues = positions.split(',').map(n => parseInt(n.trim(), 10))
 				.filter(n => !isNaN(n) && n > 0);
 			const basisSize = parseInt(basis, 10);
@@ -93,7 +100,7 @@ export const nth = (str: string, params?: string): string => {
 		// Handle "n+b" format (e.g., "n+7")
 		const nPlusBMatch = nthExpression.match(/^n\+(\d+)$/);
 		if (nPlusBMatch) {
-			const offset = parseInt(nPlusBMatch[1], 10);
+			const offset = parseInt(nPlusBMatch[1] ?? "", 10);
 			return JSON.stringify(data.filter((_, index) => {
 				const position = index + 1;
 				return position >= offset;
@@ -108,4 +115,4 @@ export const nth = (str: string, params?: string): string => {
 		console.error('Error in nth filter:', error);
 		return str;
 	}
-}; 
+};

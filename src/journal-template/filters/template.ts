@@ -1,4 +1,4 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { getNestedValue, isFilterRecord, isUnknownArray, parseJsonValue, valueToString } from "./types";
 import type { ParamValidationResult } from './types';
 
 export const validateTemplateParams = (param: string | undefined): ParamValidationResult => {
@@ -9,7 +9,7 @@ export const validateTemplateParams = (param: string | undefined): ParamValidati
 	return { valid: true };
 };
 
-export const template = (input: string | any[], param?: string): string => {
+export const template = (input: string | unknown[], param?: string): string => {
 
 	if (!param) {
 		return typeof input === 'string' ? input : JSON.stringify(input);
@@ -20,11 +20,11 @@ export const template = (input: string | any[], param?: string): string => {
 	// Remove surrounding quotes (both single and double)
 	param = param.replace(/^(['"])([\s\S]*)\1$/, '$2');
 
-	let obj: any[] = [];
+	let obj: unknown;
 	if (typeof input === 'string') {
 		try {
-			obj = JSON.parse(input);
-		} catch (error) {
+			obj = parseJsonValue(input);
+		} catch {
 			obj = [input];
 		}
 	} else {
@@ -32,30 +32,27 @@ export const template = (input: string | any[], param?: string): string => {
 	}
 
 	// Ensure obj is always an array
-	obj = Array.isArray(obj) ? obj : [obj];
+	const objects = isUnknownArray(obj) ? obj : [obj];
 
-	const result = obj.map(item => replaceTemplateVariables(item, param)).join('\n\n');
+	const result = objects.map(item => replaceTemplateVariables(item, param)).join('\n\n');
 	return result;
 };
 
-function replaceTemplateVariables(obj: any, template: string): string {
+function replaceTemplateVariables(obj: unknown, template: string): string {
 
 	// If obj is a plain string, make it available as ${str} for template compatibility
 	if (typeof obj === 'string') {
 		const strValue = obj;
-		try {
-			obj = parseObjectString(obj);
-		} catch (error) {
-		}
+		obj = parseObjectString(obj);
 		// Ensure str property is set for plain strings
-		if (obj.str === undefined) {
+		if (isFilterRecord(obj) && obj.str === undefined) {
 			obj.str = strValue;
 		}
 	}
 
-	let result = template.replace(/\$\{([\w.]+)\}/g, (match, path) => {
-		const value = getNestedProperty(obj, path);
-		return value !== undefined && value !== 'undefined' ? value : '';
+	let result = template.replace(/\$\{([\w.]+)\}/g, (_match: string, path: string) => {
+		const value = getNestedValue(obj, path);
+		return value !== undefined && value !== 'undefined' ? valueToString(value) : '';
 	});
 
 	// Replace \n with actual newlines
@@ -67,13 +64,17 @@ function replaceTemplateVariables(obj: any, template: string): string {
 	return result.trim();
 }
 
-function parseObjectString(str: string): any {
-	const obj: any = {};
+function parseObjectString(str: string): Record<string, unknown> {
+	const obj: Record<string, unknown> = {};
 	const regex = /(\w+):\s*("(?:\\.|[^"\\])*"|[^,}]+)/g;
-	let match;
+	let match: RegExpExecArray | null;
 
 	while ((match = regex.exec(str)) !== null) {
-		let [, key, value] = match;
+		const key = match[1];
+		let value = match[2];
+		if (!key || value === undefined) {
+			continue;
+		}
 		// Remove quotes from the value if it's a string
 		if (value.startsWith('"') && value.endsWith('"')) {
 			value = value.slice(1, -1);
@@ -82,11 +83,4 @@ function parseObjectString(str: string): any {
 	}
 
 	return obj;
-}
-
-function getNestedProperty(obj: any, path: string): any {
-	const result = path.split('.').reduce((current, key) => {
-		return current && typeof current === 'object' ? current[key] : undefined;
-	}, obj);
-	return result;
 }

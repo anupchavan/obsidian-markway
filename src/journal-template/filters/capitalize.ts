@@ -1,16 +1,17 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { isFilterRecord, parseJsonValue } from "./types";
+
 export const capitalize = (input: string): string => {
 	const capitalizeString = (str: string): string => 
 		str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
 
 	try {
-		const parseAndCapitalize = (value: any): any => {
+		const parseAndCapitalize = (value: unknown): unknown => {
 			if (typeof value === 'string') {
 				return capitalizeString(value);
 			} else if (Array.isArray(value)) {
 				return value.map(parseAndCapitalize);
-			} else if (typeof value === 'object' && value !== null) {
-				const result: {[key: string]: any} = {};
+			} else if (isFilterRecord(value)) {
+				const result: Record<string, unknown> = {};
 				for (const [key, val] of Object.entries(value)) {
 					result[capitalizeString(key)] = parseAndCapitalize(val);
 				}
@@ -19,10 +20,10 @@ export const capitalize = (input: string): string => {
 			return value;
 		};
 
-		const parsed = JSON.parse(input);
+		const parsed = parseJsonValue(input);
 		const capitalized = parseAndCapitalize(parsed);
 		return JSON.stringify(capitalized);
-	} catch (error) {
+	} catch {
 		// If parsing fails, treat the input as a simple string
 		return capitalizeString(input);
 	}

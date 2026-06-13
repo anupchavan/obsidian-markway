@@ -1,4 +1,3 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
 import type { ParamValidationResult } from './types';
 
 const validOsParams = ['windows', 'mac', 'linux'];
@@ -25,29 +24,37 @@ export const safe_name = (str: string, param?: string): string => {
 	let sanitized = str;
 
 	// First remove Obsidian-specific characters that should be sanitized across all platforms
-	sanitized = sanitized.replace(/[#|\^\[\]]/g, '');
+	sanitized = sanitized.replace(/[#[\]|^]/g, '');
 
 	switch (os) {
 		case 'windows':
 			sanitized = sanitized
-				.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '')
+				.split('')
+				.filter((character) => !'<>:"/\\|?*'.includes(character) && !isControlCharacter(character))
+				.join('')
 				.replace(/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i, '_$1$2')
 				.replace(/[\s.]+$/, '');
 			break;
 		case 'mac':
 			sanitized = sanitized
-				.replace(/[\/:\x00-\x1F]/g, '')
+				.split('')
+				.filter((character) => !'/:'.includes(character) && !isControlCharacter(character))
+				.join('')
 				.replace(/^\./, '_');
 			break;
 		case 'linux':
 			sanitized = sanitized
-				.replace(/[\/\x00-\x1F]/g, '')
+				.split('')
+				.filter((character) => character !== '/' && !isControlCharacter(character))
+				.join('')
 				.replace(/^\./, '_');
 			break;
 		default:
 			// Most conservative approach (combination of all rules)
 			sanitized = sanitized
-				.replace(/[<>:"\/\\|?*:\x00-\x1F]/g, '')
+				.split('')
+				.filter((character) => !'<>:"/\\|?*:'.includes(character) && !isControlCharacter(character))
+				.join('')
 				.replace(/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i, '_$1$2')
 				.replace(/[\s.]+$/, '')
 				.replace(/^\./, '_');
@@ -66,3 +73,7 @@ export const safe_name = (str: string, param?: string): string => {
 
 	return sanitized;
 };
+
+function isControlCharacter(character: string): boolean {
+	return character.charCodeAt(0) < 32;
+}

@@ -1,4 +1,3 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
 import { createParserState, processCharacter, parseRegexPattern } from './parser-utils';
 import type { ParamValidationResult } from './types';
 
@@ -39,7 +38,7 @@ export const replace = (str: string, param?: string): string => {
 	const state = createParserState();
 
 	for (let i = 0; i < param.length; i++) {
-		const char = param[i];
+		const char = param[i] ?? '';
 
 		if (char === ',' && !state.inQuote && !state.inRegex &&
 			state.curlyDepth === 0 && state.parenDepth === 0) {
@@ -56,10 +55,12 @@ export const replace = (str: string, param?: string): string => {
 
 	// Apply each replacement in sequence
 	return replacements.reduce((acc, replacement) => {
-		let [search, replace] = replacement.split(/(?<=[^\\]["']):(?=["'])/).map(p => {
+		const [searchPart, replacePart] = replacement.split(/(?<=[^\\]["']):(?=["'])/).map(p => {
 			// Remove surrounding quotes but preserve escaped characters
 			return p.trim().replace(/^["']|["']$/g, '');
 		});
+		let search = searchPart ?? '';
+		let replace = replacePart ?? '';
 
 		// Use an empty string if replace is undefined
 		replace = replace || '';
@@ -99,7 +100,7 @@ export const replace = (str: string, param?: string): string => {
 };
 
 function processEscapedCharacters(str: string): string {
-	return str.replace(/\\([nrt]|[^nrt])/g, (match, char) => {
+	return str.replace(/\\([nrt]|[^nrt])/g, (_match: string, char: string) => {
 		switch (char) {
 			case 'n': return '\n';
 			case 'r': return '\r';

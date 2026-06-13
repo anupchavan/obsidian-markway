@@ -1,4 +1,4 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { isFilterRecord, parseJsonValue, valueToString } from "./types";
 import { escapeMarkdown } from './string-utils';
 
 export const image = (str: string, param?: string): string | string[] => {
@@ -15,28 +15,28 @@ export const image = (str: string, param?: string): string | string[] => {
 	}
 
 	try {
-		const data = JSON.parse(str);
+		const data = parseJsonValue(str);
 		
-		const processObject = (obj: any): string[] => {
+		const processObject = (obj: Record<string, unknown>): string[] => {
 			return Object.entries(obj).map(([key, value]) => {
-				if (typeof value === 'object' && value !== null) {
+				if (isFilterRecord(value)) {
 					return processObject(value);
 				}
-				return `![${escapeMarkdown(String(value))}](${escapeMarkdown(key)})`;
+				return `![${escapeMarkdown(valueToString(value))}](${escapeMarkdown(key)})`;
 			}).flat();
 		};
 
 		if (Array.isArray(data)) {
 			return data.map(item => {
-				if (typeof item === 'object' && item !== null) {
+				if (isFilterRecord(item)) {
 					return processObject(item);
 				}
-				return item ? `![${altText}](${escapeMarkdown(String(item))})` : '';
+				return item ? `![${altText}](${escapeMarkdown(valueToString(item))})` : '';
 			}).flat();
-		} else if (typeof data === 'object' && data !== null) {
+		} else if (isFilterRecord(data)) {
 			return processObject(data);
 		}
-	} catch (error) {
+	} catch {
 		// If parsing fails, treat it as a single URL string
 		return `![${altText}](${escapeMarkdown(str)})`;
 	}

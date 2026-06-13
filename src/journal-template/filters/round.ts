@@ -1,4 +1,4 @@
-// @ts-nocheck -- vendored from obsidian-clipper @ 372d420; keep byte-close to upstream.
+import { isFilterRecord, parseJsonOr, stringifyFilterValue } from "./types";
 import type { ParamValidationResult } from './types';
 
 export const validateRoundParams = (param: string | undefined): ParamValidationResult => {
@@ -28,7 +28,7 @@ export const round = (input: string, param?: string): string => {
 		return Math.round(num * factor) / factor;
 	};
 
-	const processValue = (value: any, decimalPlaces?: number): any => {
+	const processValue = (value: unknown, decimalPlaces?: number): unknown => {
 		if (typeof value === 'number') {
 			return roundNumber(value, decimalPlaces);
 		} else if (typeof value === 'string') {
@@ -36,8 +36,8 @@ export const round = (input: string, param?: string): string => {
 			return isNaN(num) ? value : roundNumber(num, decimalPlaces).toString();
 		} else if (Array.isArray(value)) {
 			return value.map(item => processValue(item, decimalPlaces));
-		} else if (typeof value === 'object' && value !== null) {
-			const result: {[key: string]: any} = {};
+		} else if (isFilterRecord(value)) {
+			const result: Record<string, unknown> = {};
 			for (const [key, val] of Object.entries(value)) {
 				result[key] = processValue(val, decimalPlaces);
 			}
@@ -52,18 +52,11 @@ export const round = (input: string, param?: string): string => {
 			return input; // Return the original input if the parameter is not a valid number
 		}
 
-		let parsedInput: any;
-		try {
-			parsedInput = JSON.parse(input);
-		} catch {
-			// If JSON parsing fails, treat input as a single value
-			parsedInput = input;
-		}
-
-		const result = processValue(parsedInput, decimalPlaces);
-		return typeof result === 'string' ? result : JSON.stringify(result);
-	} catch (error) {
-		console.error('Error in round filter:', error);
-		return input; // Return original input if any unexpected error occurs
+			const parsedInput = parseJsonOr(input, input);
+			const result = processValue(parsedInput, decimalPlaces);
+			return stringifyFilterValue(result);
+		} catch (error) {
+			console.error('Error in round filter:', error);
+			return input; // Return original input if any unexpected error occurs
 	}
 };
