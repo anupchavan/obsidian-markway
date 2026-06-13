@@ -9,6 +9,7 @@ export interface BridgeRequest {
 	journalID?: string;
 	assetID?: string;
 	title?: string;
+	created?: string;
 	includeMusicAttachments?: boolean;
 	includePhotoAttachments?: boolean;
 	includeAttachments?: boolean;

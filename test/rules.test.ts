@@ -367,6 +367,18 @@ describe("normalization and property discovery", () => {
 		expect(normalized.conditions).toHaveLength(0);
 	});
 
+	it("deduplicates repeated child conditions from persisted rules", () => {
+		const folderRule = filter("file.folder", "is", "Journal");
+		const nestedRule = group("AND", [filter("file.folder", "is", "Journal")]);
+		const normalized = normalizeFilterGroup(group("AND", [
+			folderRule,
+			{ ...folderRule },
+			nestedRule,
+			group("AND", [filter("file.folder", "is", "Journal")]),
+		]));
+		expect(normalized.conditions).toEqual([folderRule, nestedRule]);
+	});
+
 	it("normalizes invalid filters to a file filter", () => {
 		const normalized = normalizeFilterGroup({
 			type: "group",

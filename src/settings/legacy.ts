@@ -35,7 +35,6 @@ export function renderLegacyJournalSettings(
 		async () => {
 			await plugin.savePluginData();
 		},
-		onRefresh,
 		plugin.journalImportFolder()
 	);
 

@@ -6,19 +6,25 @@ import {
 	Plugin,
 	TAbstractFile,
 	TFile,
+	parseYaml,
 } from "obsidian";
 import { checkRules, firstFolderFromRules } from "./rules";
 import { extractWikilinkTarget } from "./rules/wikilinks";
 import { MarkwayBridgeClient, type BridgeRequest, type BridgeResponse } from "./bridge-client";
 import { registerMarkwayCommands } from "./commands";
 import {
+	isEmptyFrontmatterValue,
 	journalBodyContent,
+	journalCreatedDateFromNoteName,
+	journalTemplateNeedsAttachmentMetadata,
 	journalTemplateNeedsAttachments,
+	journalTitleFromNoteName,
 	journalTemplateNeedsMusic,
 	journalTemplateNeedsPhotos,
 	journalTemplateSettingsHash,
 	parseJournalBodySections,
 	renderJournalBodySections,
+	renderJournalNoteName,
 	renderJournalTemplateProperties,
 	serializeJournalBody,
 	stripGeneratedContentChrome,
@@ -29,13 +35,13 @@ import {
 import { MarkwaySettingTab } from "./settings";
 import {
 	addedFrontmatterValues,
+	canSkipJournalEntryForSummary,
 	canonicalPath,
 	composeMarkdown,
 	describeUnknown,
 	explainMarkwayError,
 	frontmatterComparableValues,
 	hashJournalContent,
-	hasMatchingJournalSummary,
 	hasUnsyncedMarkdownContent,
 	isRecord,
 	isFileExistsError,
@@ -86,6 +92,31 @@ interface PushOptions {
 	force?: boolean;
 	silent?: boolean;
 	linkedOnly?: boolean;
+}
+
+function comparableDateValue(value: string): string {
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? new Date(parsed).toISOString() : value.trim();
+}
+
+function calendarDateString(value: Date): string {
+	const year = value.getFullYear();
+	const month = `${value.getMonth() + 1}`.padStart(2, "0");
+	const day = `${value.getDate()}`.padStart(2, "0");
+	return `${year}-${month}-${day}`;
+}
+
+function dateOnlyFrontmatterValue(value: string, rawValue?: string | null): string | null {
+	const raw = rawValue?.trim().replace(/^(['"])([\s\S]*)\1$/, "$2") ?? "";
+	const rawDate = raw.match(/^(\d{4}-\d{2}-\d{2})$/)?.[1];
+	if (rawDate) {
+		return rawDate;
+	}
+	return value.trim().match(/^(\d{4}-\d{2}-\d{2})$/)?.[1] ?? null;
+}
+
+function journalBodyForPush(body: string): string {
+	return body.replace(/\n+$/g, "");
 }
 
 export default class MarkwayPlugin extends Plugin {
@@ -253,7 +284,7 @@ export default class MarkwayPlugin extends Plugin {
 		this.suppressFile(oldPath);
 		this.suppressFile(file.path);
 		link.path = file.path;
-		link.title = titleForFile(file.path);
+		link.title = this.journalTitleForFile(file.path);
 		void this.savePluginData();
 		if (this.settings.automaticSync && this.fileMatchesJournalRules(file)) {
 			void this.pushFile(file, { force: true, linkedOnly: true, silent: true });
@@ -324,11 +355,12 @@ export default class MarkwayPlugin extends Plugin {
 				await this.syncGeneratedAttachmentEdits(file, link);
 			}
 
-			const title = titleForFile(file.path);
+			const title = this.journalTitleForFile(file.path);
 			const markdown = await this.app.vault.read(file);
 			const journalBody = this.bodyForJournalPush(markdown, title, link);
 			const journalHash = hashJournalContent(title, journalBody);
-			if (!options.force && link && link.lastJournalHash === journalHash && link.title === title) {
+			const createdUpdate = this.journalCreatedDateForPush(file, markdown, link);
+			if (!options.force && link && link.lastJournalHash === journalHash && link.title === title && !createdUpdate) {
 				this.setStatus(`Markway skipped unchanged ${file.path}`);
 				return;
 			}
@@ -339,6 +371,7 @@ export default class MarkwayPlugin extends Plugin {
 				relativePath: file.path,
 				journalID: link?.journalID,
 				title,
+				created: createdUpdate?.value,
 				// Send the extracted journal text; Markway.app must not push the
 				// raw file, which contains generated template sections.
 				body: journalBody,
@@ -348,18 +381,28 @@ export default class MarkwayPlugin extends Plugin {
 				throw new Error(result.message || "Markway app did not return a Journal ID.");
 			}
 
+			const lastTemplatePropertyKeys = [...(link?.lastTemplatePropertyKeys ?? [])];
+			const lastTemplateProperties = { ...(link?.lastTemplateProperties ?? {}) };
+			if (createdUpdate && !lastTemplatePropertyKeys.includes(createdUpdate.key)) {
+				lastTemplatePropertyKeys.push(createdUpdate.key);
+			}
+			if (createdUpdate) {
+				lastTemplateProperties[createdUpdate.key] = createdUpdate.value;
+			}
+
 			this.journalLinks[result.journalID] = {
 				journalID: result.journalID,
 				path: file.path,
 				title,
 				lastSyncedAt: new Date().toISOString(),
+				lastJournalCreated: createdUpdate?.value ?? link?.lastJournalCreated ?? "",
 				lastMarkdownHash: markdownHash,
 				lastJournalHash: journalHash,
 				lastJournalUpdated: "",
 				lastTemplateHash: link?.lastTemplateHash ?? "",
 				lastTemplateSettingsHash: link?.lastTemplateSettingsHash ?? "",
-				lastTemplatePropertyKeys: link?.lastTemplatePropertyKeys ?? [],
-				lastTemplateProperties: link?.lastTemplateProperties ?? {},
+				lastTemplatePropertyKeys,
+				lastTemplateProperties,
 				lastAttachmentPropertyItems: link?.lastAttachmentPropertyItems ?? {},
 				lastContentPrefix: link?.lastContentPrefix ?? "",
 				lastContentSuffix: link?.lastContentSuffix ?? "",
@@ -433,12 +476,23 @@ export default class MarkwayPlugin extends Plugin {
 					skipped += 1;
 					continue;
 				}
+				if (existing) {
+					existing.lastJournalCreated = summary.created || existing.lastJournalCreated || "";
+				}
 				if (existing && await this.hasUnsyncedLocalChanges(existing)) {
 					this.queuePushForLink(existing);
 					skipped += 1;
 					continue;
 				}
-				if (existing && hasMatchingJournalSummary(existing, summary) && !this.needsTemplateRefresh(existing)) {
+				if (existing && await this.needsJournalCreatedPush(existing)) {
+					this.queuePushForLink(existing);
+					skipped += 1;
+					continue;
+				}
+				if (existing && canSkipJournalEntryForSummary(existing, summary, {
+					templateNeedsRefresh: this.needsTemplateRefresh(existing),
+					metadataNeedsRefresh: journalTemplateNeedsAttachmentMetadata(this.settings),
+				})) {
 					skipped += 1;
 					continue;
 				}
@@ -582,19 +636,21 @@ export default class MarkwayPlugin extends Plugin {
 			existing?.lastPhotoFiles ?? {},
 			photoSync
 		);
+		const trackedTemplateState = this.withPushOnlyTemplateProperties(existing, templateState);
 		const markdownHash = sha256Hex(await this.app.vault.read(file));
 		this.journalLinks[entry.id] = {
 			journalID: entry.id,
 			path: file.path,
-			title: entry.title,
-			lastSyncedAt: new Date().toISOString(),
-			lastMarkdownHash: markdownHash,
-			lastJournalHash: hashJournalContent(entry.title, entry.body),
+				title: entry.title,
+				lastSyncedAt: new Date().toISOString(),
+				lastJournalCreated: entry.created || existing?.lastJournalCreated || "",
+				lastMarkdownHash: markdownHash,
+				lastJournalHash: hashJournalContent(entry.title, entry.body),
 			lastJournalUpdated: entry.updated || summaryUpdated || "",
 			lastTemplateHash: templateState.hash,
 			lastTemplateSettingsHash: templateState.settingsHash,
-			lastTemplatePropertyKeys: templateState.propertyKeys,
-			lastTemplateProperties: templateState.properties,
+			lastTemplatePropertyKeys: trackedTemplateState.propertyKeys,
+			lastTemplateProperties: trackedTemplateState.properties,
 			lastAttachmentPropertyItems: templateState.attachmentPropertyItems,
 			lastContentPrefix: "",
 			lastContentSuffix: "",
@@ -665,8 +721,10 @@ export default class MarkwayPlugin extends Plugin {
 		const attachmentPropertyItems = { ...rendered.attachmentPropertyItems };
 
 		if (photosKey && photoSync) {
-			properties[photosKey] = photoSync.values;
-			if (photoSync.items.length > 0) {
+			if (!isEmptyFrontmatterValue(photoSync.values)) {
+				properties[photosKey] = photoSync.values;
+			}
+			if (photoSync.items.length > 0 && !isEmptyFrontmatterValue(photoSync.values)) {
 				attachmentPropertyItems[photosKey] = photoSync.items;
 			} else {
 				delete attachmentPropertyItems[photosKey];
@@ -719,6 +777,37 @@ export default class MarkwayPlugin extends Plugin {
 
 		values.push(...this.unmanagedPhotoPropertyValues(notePath, values));
 		return { files, values, items };
+	}
+
+	private withPushOnlyTemplateProperties(
+		link: JournalLink | undefined,
+		templateState: {
+			propertyKeys: string[];
+			properties: Record<string, unknown>;
+		}
+	): { propertyKeys: string[]; properties: Record<string, unknown> } {
+		const key = this.settings.journalCreatedProperty.trim();
+		if (
+			!key
+			|| !link
+			|| Object.prototype.hasOwnProperty.call(templateState.properties, key)
+			|| !Object.prototype.hasOwnProperty.call(link.lastTemplateProperties, key)
+		) {
+			return {
+				propertyKeys: templateState.propertyKeys,
+				properties: templateState.properties,
+			};
+		}
+
+		return {
+			propertyKeys: templateState.propertyKeys.includes(key)
+				? templateState.propertyKeys
+				: [...templateState.propertyKeys, key],
+			properties: {
+				...templateState.properties,
+				[key]: link.lastTemplateProperties[key],
+			},
+		};
 	}
 
 	private unmanagedPhotoPropertyValues(notePath: string, generatedValues: string[]): string[] {
@@ -803,8 +892,21 @@ export default class MarkwayPlugin extends Plugin {
 		}
 
 		const markdown = await this.app.vault.read(file);
-		const title = titleForFile(file.path);
+		const title = this.journalTitleForFile(file.path);
 		return hasUnsyncedMarkdownContent(link, markdown, title, this.bodyForJournalPush(markdown, title, link));
+	}
+
+	private async needsJournalCreatedPush(link: JournalLink): Promise<boolean> {
+		if (!this.settings.journalCreatedProperty.trim() || !link.lastJournalCreated) {
+			return false;
+		}
+		const file = this.fileForPath(link.path);
+		if (!file) {
+			return false;
+		}
+
+		const markdown = await this.app.vault.read(file);
+		return this.journalCreatedDateForPush(file, markdown, link) !== null;
 	}
 
 	private queuePushForLink(link: JournalLink) {
@@ -834,21 +936,75 @@ export default class MarkwayPlugin extends Plugin {
 		return true;
 	}
 
+	private journalTitleForFile(path: string): string {
+		return journalTitleFromNoteName(titleForFile(path), this.settings.journalNoteNameTemplate);
+	}
+
+	private journalCreatedDateForPush(
+		file: TFile,
+		markdown?: string,
+		link?: JournalLink | null
+	): { key: string; value: string } | null {
+		const key = this.settings.journalCreatedProperty.trim();
+		if (!key) {
+			return null;
+		}
+
+		const parsedFrontmatter = markdown ? this.frontmatterForMarkdown(markdown) : {};
+		const cachedFrontmatter = this.frontmatterForFile(file);
+		const frontmatter = Object.prototype.hasOwnProperty.call(parsedFrontmatter, key)
+			? parsedFrontmatter
+			: cachedFrontmatter;
+		if (!Object.prototype.hasOwnProperty.call(frontmatter, key)) {
+			return null;
+		}
+		const value = frontmatterComparableValues(frontmatter[key])[0]?.trim() ?? "";
+		if (!value) {
+			return null;
+		}
+		const created = this.createdDateValueForJournalPush(file, markdown ?? "", key, value);
+		const journalCreated = link?.lastJournalCreated?.trim() ?? "";
+		if (link && journalCreated && comparableDateValue(created) !== comparableDateValue(journalCreated)) {
+			return { key, value: created };
+		}
+		const previous = link ? frontmatterComparableValues(link.lastTemplateProperties[key])[0]?.trim() ?? "" : "";
+		if (link && previous && comparableDateValue(created) === comparableDateValue(previous)) {
+			return null;
+		}
+		return { key, value: created };
+	}
+
+	private createdDateValueForJournalPush(file: TFile, markdown: string, key: string, value: string): string {
+		const frontmatterDate = dateOnlyFrontmatterValue(value, this.rawFrontmatterValue(markdown, key));
+		if (!frontmatterDate) {
+			return value;
+		}
+
+		const filenameDate = journalCreatedDateFromNoteName(
+			titleForFile(file.path),
+			this.settings.journalNoteNameTemplate
+		);
+		if (!filenameDate?.hasDate || !filenameDate.hasTime || calendarDateString(filenameDate.date) !== frontmatterDate) {
+			return value;
+		}
+		return filenameDate.date.toISOString();
+	}
+
 	private bodyForJournalPush(markdown: string, title: string, link?: JournalLink | null): string {
 		let body = splitMarkdown(markdown).body;
 		if (this.settings.journalIncludeTitleHeading) {
 			body = stripGeneratedTitleHeading(body, title);
 		}
 		if (!link) {
-			return body;
+			return journalBodyForPush(body);
 		}
 		if (link.lastBodySections.some((section) => section.marker)) {
 			const content = journalBodyContent(body, link.lastBodySections);
 			if (content !== null) {
-				return content;
+				return journalBodyForPush(content);
 			}
 		}
-		return stripGeneratedContentChrome(body, link.lastContentPrefix, link.lastContentSuffix);
+		return journalBodyForPush(stripGeneratedContentChrome(body, link.lastContentPrefix, link.lastContentSuffix));
 	}
 
 	private async syncGeneratedAttachmentEdits(file: TFile, link: JournalLink): Promise<void> {
@@ -908,8 +1064,9 @@ export default class MarkwayPlugin extends Plugin {
 		const templateState = await this.applyJournalTemplateProperties(file, entry, previousPhotoFiles);
 		link.lastTemplateHash = templateState.hash;
 		link.lastTemplateSettingsHash = templateState.settingsHash;
-		link.lastTemplatePropertyKeys = templateState.propertyKeys;
-		link.lastTemplateProperties = templateState.properties;
+		const trackedTemplateState = this.withPushOnlyTemplateProperties(link, templateState);
+		link.lastTemplatePropertyKeys = trackedTemplateState.propertyKeys;
+		link.lastTemplateProperties = trackedTemplateState.properties;
 		link.lastAttachmentPropertyItems = templateState.attachmentPropertyItems;
 		link.lastPhotoFiles = templateState.photoFiles;
 		link.lastJournalHash = hashJournalContent(entry.title, entry.body);
@@ -1030,16 +1187,15 @@ export default class MarkwayPlugin extends Plugin {
 	}
 
 	private async desiredPathForEntry(entry: JournalEntryText, existing?: JournalLink): Promise<string> {
-		const fileName = `${sanitizeFileName(entry.title || "Journal Entry")}.md`;
-		const folder = this.journalImportFolder();
-		const desired = folder ? `${folder}/${fileName}` : fileName;
-		if (!existing) {
-			return normalizePath(desired);
+		if (existing) {
+			return normalizePath(existing.path);
 		}
 
-		const currentFolder = dirname(existing.path);
-		const targetFolder = currentFolder === "." ? folder : currentFolder;
-		return normalizePath(targetFolder ? `${targetFolder}/${fileName}` : fileName);
+		const renderedName = sanitizeFileName(renderJournalNoteName(entry, this.settings));
+		const fileName = `${renderedName || sanitizeFileName(entry.title) || "Journal Entry"}.md`;
+		const folder = this.journalImportFolder();
+		const desired = folder ? `${folder}/${fileName}` : fileName;
+		return normalizePath(desired);
 	}
 
 	journalImportFolder(): string {
@@ -1097,12 +1253,13 @@ export default class MarkwayPlugin extends Plugin {
 		}
 
 		const markdown = await this.app.vault.read(file);
-		const title = titleForFile(file.path);
+		const title = this.journalTitleForFile(file.path);
 		this.journalLinks[journalID] = {
 			journalID,
 			path: file.path,
 			title,
 			lastSyncedAt: new Date().toISOString(),
+			lastJournalCreated: "",
 			lastMarkdownHash: sha256Hex(markdown),
 			lastJournalHash: hashJournalContent(title, this.bodyForJournalPush(markdown, title)),
 			lastJournalUpdated: "",
@@ -1306,6 +1463,38 @@ export default class MarkwayPlugin extends Plugin {
 	private frontmatterForFile(file: TFile): Record<string, unknown> {
 		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
 		return isRecord(frontmatter) ? frontmatter : {};
+	}
+
+	private frontmatterForMarkdown(markdown: string): Record<string, unknown> {
+		const frontmatter = splitMarkdown(markdown).frontmatter;
+		if (!frontmatter) {
+			return {};
+		}
+		try {
+			const parsed: unknown = parseYaml(frontmatter.replace(/^---\n/, "").replace(/\n---\n?$/, ""));
+			return isRecord(parsed) ? parsed : {};
+		} catch {
+			return {};
+		}
+	}
+
+	private rawFrontmatterValue(markdown: string, key: string): string | null {
+		const frontmatter = splitMarkdown(markdown).frontmatter;
+		if (!frontmatter) {
+			return null;
+		}
+
+		const body = frontmatter.replace(/^---\n/, "").replace(/\n---\n?$/, "");
+		const quotedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const keyPattern = `(?:${quotedKey}|["']${quotedKey}["'])`;
+		const linePattern = new RegExp(`^\\s*${keyPattern}\\s*:\\s*([^#\\n]*?)\\s*(?:#.*)?$`);
+		for (const line of body.split("\n")) {
+			const match = line.match(linePattern);
+			if (match) {
+				return match[1]?.trim() ?? "";
+			}
+		}
+		return null;
 	}
 
 	private fileForPath(path: string): TFile | null {

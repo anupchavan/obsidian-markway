@@ -18,6 +18,7 @@ export default tseslint.config(
 		"main.js",
 		"package.json",
 		"package-lock.json",
+		"scripts/*.mjs",
 		// Vendored copies of obsidian-clipper filters; kept byte-close to
 		// upstream instead of restyled to this repo's lint rules.
 		"src/journal-template/filters/*",

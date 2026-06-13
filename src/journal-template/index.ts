@@ -9,6 +9,10 @@ import {
 } from "../sync-utils";
 import { coerceFrontmatterValue, journalTemplateContext } from "./context";
 import { renderTemplate, templateVariableNames, validateTemplateVariables } from "./engine";
+import dayjs from "dayjs";
+import customParseFormat from "dayjs/plugin/customParseFormat";
+
+dayjs.extend(customParseFormat);
 
 export { JOURNAL_TEMPLATE_VARIABLES, validateTemplateVariables } from "./engine";
 
@@ -26,7 +30,7 @@ export interface TemplateValidationError {
 
 const MUSIC_TEMPLATE_NAMES = new Set(["music", "attachments"]);
 const PHOTO_TEMPLATE_NAMES = new Set(["photos", "attachments"]);
-const GENERIC_ATTACHMENT_TEMPLATE_NAMES = new Set(["attachments"]);
+const GENERIC_ATTACHMENT_TEMPLATE_NAMES = new Set(["attachments", "places", "reflection"]);
 
 export function journalTemplateNeedsMusic(settings: MarkwaySettings): boolean {
 	return journalTemplateUses(settings, MUSIC_TEMPLATE_NAMES);
@@ -41,9 +45,16 @@ export function journalTemplateNeedsAttachments(settings: MarkwaySettings): bool
 	return journalTemplateUses(settings, GENERIC_ATTACHMENT_TEMPLATE_NAMES);
 }
 
+export function journalTemplateNeedsAttachmentMetadata(settings: MarkwaySettings): boolean {
+	return journalTemplateNeedsMusic(settings)
+		|| journalTemplateNeedsPhotos(settings)
+		|| journalTemplateNeedsAttachments(settings);
+}
+
 export function templateUsesAttachments(template: string): boolean {
 	return templateUsesVariable(template, MUSIC_TEMPLATE_NAMES)
-		|| templateUsesVariable(template, PHOTO_TEMPLATE_NAMES);
+		|| templateUsesVariable(template, PHOTO_TEMPLATE_NAMES)
+		|| templateUsesVariable(template, GENERIC_ATTACHMENT_TEMPLATE_NAMES);
 }
 
 export function journalTemplateSettingsHash(settings: MarkwaySettings): string {
@@ -76,7 +87,11 @@ export function renderJournalTemplateProperties(
 		if (rendered.errors.length > 0) {
 			errors.push(...rendered.errors.map((message) => ({ propertyID: property.id, message })));
 		}
-		properties[key] = coerceFrontmatterValue(rendered.value);
+		const value = coerceFrontmatterValue(rendered.value);
+		if (isEmptyFrontmatterValue(value)) {
+			continue;
+		}
+		properties[key] = value;
 		const items = renderAttachmentPropertyItems(entry, property.value, now, photoFiles);
 		if (items.length > 0) {
 			attachmentPropertyItems[key] = items;
@@ -86,6 +101,19 @@ export function renderJournalTemplateProperties(
 	const settingsHash = journalTemplateSettingsHash(settings);
 	const hash = sha256Hex(JSON.stringify({ settingsHash, properties }));
 	return { properties, hash, errors, attachmentPropertyItems };
+}
+
+export function isEmptyFrontmatterValue(value: unknown): boolean {
+	if (value === null || value === undefined || value === "") {
+		return true;
+	}
+	if (Array.isArray(value)) {
+		return value.length === 0;
+	}
+	if (typeof value === "object") {
+		return Object.keys(value).length === 0;
+	}
+	return false;
 }
 
 const CONTENT_ANCHOR_NAMES = new Set(["content", "body", "entry.content", "entry.body"]);
@@ -243,6 +271,228 @@ function generatedSectionMarker(segmentTemplate: string): string {
 	}
 	const label = [...names].join(", ") || "generated";
 	return `%% ${label} %%`;
+}
+
+export function renderJournalNoteName(
+	entry: JournalEntryText,
+	settings: MarkwaySettings,
+	now = new Date()
+): string {
+	const template = settings.journalNoteNameTemplate.trim();
+	if (!template) {
+		return entry.title;
+	}
+	const rendered = renderTemplate(template, journalTemplateContext(entry, now));
+	if (rendered.errors.length > 0) {
+		return entry.title;
+	}
+	const name = rendered.value.replace(/\s+/g, " ").trim();
+	return name || entry.title;
+}
+
+/// Inverts the note name template to recover the journal title from a file
+/// name. Date-formatted variables match their digit shapes so a name like
+/// "2026-06-11 1530 My Title" maps back to "My Title"; other variables match
+/// lazily. Without a {{title}} slot (or on mismatch) the whole name is the
+/// title.
+export function journalTitleFromNoteName(name: string, template: string): string {
+	const trimmed = template.trim();
+	if (!trimmed || trimmed === "{{title}}") {
+		return name;
+	}
+
+	let pattern = "";
+	let lastIndex = 0;
+	let hasTitleGroup = false;
+	for (const match of trimmed.matchAll(/\{\{([\s\S]*?)\}\}/g)) {
+		pattern += noteNameLiteralPattern(trimmed.slice(lastIndex, match.index ?? 0));
+		const expression = (match[1] ?? "").trim();
+		const segments = expression.split("|");
+		const root = segments[0]?.trim() ?? "";
+		if (!hasTitleGroup && (root === "title" || root === "entry.title")) {
+			pattern += "(.+)";
+			hasTitleGroup = true;
+		} else {
+			pattern += noteNameVariablePattern(segments.slice(1));
+		}
+		lastIndex = (match.index ?? 0) + match[0].length;
+	}
+	pattern += noteNameLiteralPattern(trimmed.slice(lastIndex));
+
+	if (!hasTitleGroup) {
+		return name;
+	}
+	const result = new RegExp(`^${pattern}$`).exec(name);
+	return result?.[1]?.trim() || name;
+}
+
+export interface JournalNoteNameDate {
+	raw: string;
+	format: string;
+	date: Date;
+	hasDate: boolean;
+	hasTime: boolean;
+}
+
+export function journalCreatedDateFromNoteName(name: string, template: string): JournalNoteNameDate | null {
+	const trimmed = template.trim();
+	if (!trimmed) {
+		return null;
+	}
+
+	let pattern = "";
+	let lastIndex = 0;
+	let groupIndex = 0;
+	let createdGroupIndex = -1;
+	let createdFormat = "";
+	for (const match of trimmed.matchAll(/\{\{([\s\S]*?)\}\}/g)) {
+		pattern += noteNameLiteralPattern(trimmed.slice(lastIndex, match.index ?? 0));
+		const expression = (match[1] ?? "").trim();
+		const segments = expression.split("|");
+		const root = segments[0]?.trim() ?? "";
+		const filters = segments.slice(1);
+		if (createdGroupIndex === -1 && (root === "created" || root === "entry.created")) {
+			const format = dateFilterFormat(filters);
+			if (!format) {
+				return null;
+			}
+			pattern += `(${dateFormatPattern(format)})`;
+			groupIndex += 1;
+			createdGroupIndex = groupIndex;
+			createdFormat = format;
+		} else if (root === "title" || root === "entry.title") {
+			pattern += ".+";
+		} else {
+			pattern += noteNameVariablePattern(filters);
+		}
+		lastIndex = (match.index ?? 0) + match[0].length;
+	}
+	pattern += noteNameLiteralPattern(trimmed.slice(lastIndex));
+
+	if (createdGroupIndex === -1) {
+		return null;
+	}
+	const raw = new RegExp(`^${pattern}$`).exec(name)?.[createdGroupIndex]?.trim() ?? "";
+	if (!raw) {
+		return null;
+	}
+	const parsed = parseNoteNameDate(raw, createdFormat);
+	if (!parsed.isValid()) {
+		return null;
+	}
+	return {
+		raw,
+		format: createdFormat,
+		date: parsed.toDate(),
+		hasDate: dateFormatHasDate(createdFormat),
+		hasTime: dateFormatHasTime(createdFormat),
+	};
+}
+
+function parseNoteNameDate(raw: string, format: string): dayjs.Dayjs {
+	const formats = [format, sanitizedDateFormat(format)];
+	for (const candidate of [...new Set(formats)]) {
+		const parsed = dayjs(raw, candidate, true);
+		if (parsed.isValid()) {
+			return parsed;
+		}
+	}
+	return dayjs(Number.NaN);
+}
+
+function sanitizedDateFormat(format: string): string {
+	return format.replace(/[/:]/g, "-");
+}
+
+function noteNameVariablePattern(filters: string[]): string {
+	for (const filter of filters) {
+		const format = dateFilterFormat([filter]);
+		if (format) {
+			return dateFormatPattern(format);
+		}
+	}
+	return ".*?";
+}
+
+function dateFilterFormat(filters: string[]): string | null {
+	for (const filter of filters) {
+		const trimmed = filter.trim();
+		if (!trimmed.startsWith("date:")) {
+			continue;
+		}
+		const param = trimmed.slice("date:".length).trim().replace(/^\(([\s\S]*)\)$/, "$1").trim();
+		const quoted = param.match(/^(['"])([\s\S]*?)\1/);
+		if (quoted?.[2]) {
+			return quoted[2];
+		}
+		const unquoted = param.split(",")[0]?.trim() ?? "";
+		return unquoted || null;
+	}
+	return null;
+}
+
+function dateFormatHasTime(format: string): boolean {
+	return /(^|[^A-Za-z])(?:H{1,2}|h{1,2}|m{1,2}|s{1,2}|A|a)([^A-Za-z]|$)/.test(stripDateFormatLiterals(format));
+}
+
+function dateFormatHasDate(format: string): boolean {
+	return /(^|[^A-Za-z])(?:Y{2,4}|M{1,4}|D{1,2}|Do)([^A-Za-z]|$)/.test(stripDateFormatLiterals(format));
+}
+
+function stripDateFormatLiterals(format: string): string {
+	return format.replace(/\[[^\]]*]/g, "");
+}
+
+function dateFormatPattern(format: string): string {
+	const tokens: [string, string][] = [
+		["YYYY", "\\d{4}"], ["YY", "\\d{2}"],
+		["MMMM", "[A-Za-z]+"], ["MMM", "[A-Za-z]+"],
+		["MM", "\\d{2}"], ["M", "\\d{1,2}"],
+		["DD", "\\d{2}"], ["Do", "\\d{1,2}(?:st|nd|rd|th)"], ["D", "\\d{1,2}"],
+		["HH", "\\d{2}"], ["H", "\\d{1,2}"], ["hh", "\\d{2}"], ["h", "\\d{1,2}"],
+		["mm", "\\d{2}"], ["m", "\\d{1,2}"], ["ss", "\\d{2}"], ["s", "\\d{1,2}"],
+		["A", "[AP]M"], ["a", "[ap]m"],
+		["ZZ", "(?:Z|[+-]\\d{4})"], ["Z", "(?:Z|[+-]\\d{2}:?\\d{2})"],
+	];
+	let out = "";
+	let index = 0;
+	while (index < format.length) {
+		if (format[index] === "[") {
+			const close = format.indexOf("]", index + 1);
+			if (close !== -1) {
+				out += noteNameLiteralPattern(format.slice(index + 1, close));
+				index = close + 1;
+				continue;
+			}
+		}
+		const token = tokens.find(([tokenName]) => format.startsWith(tokenName, index));
+		if (token) {
+			out += token[1];
+			index += token[0].length;
+		} else {
+			out += noteNameLiteralPattern(format[index] ?? "");
+			index += 1;
+		}
+	}
+	return out;
+}
+
+function noteNameLiteralPattern(value: string): string {
+	let pattern = "";
+	for (const character of value) {
+		if (character === ":") {
+			pattern += "[:-]";
+		} else if (character === "/") {
+			pattern += "[/-]";
+		} else {
+			pattern += escapeRegExp(character);
+		}
+	}
+	return pattern;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function renderJournalContent(

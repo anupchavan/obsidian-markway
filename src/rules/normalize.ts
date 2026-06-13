@@ -16,7 +16,7 @@ function normalizeCondition(value: unknown): Filter | FilterGroup | null {
 		const conditions = Array.isArray(value.conditions)
 			? value.conditions.map(normalizeCondition).filter(isCondition)
 			: [];
-		return { type: "group", operator, conditions };
+		return { type: "group", operator, conditions: dedupeConditions(conditions) };
 	}
 
 	if (value.type === "filter") {
@@ -46,6 +46,20 @@ function isConjunction(value: unknown): value is FilterConjunction {
 
 function isCondition(value: Filter | FilterGroup | null): value is Filter | FilterGroup {
 	return value !== null;
+}
+
+function dedupeConditions(conditions: Array<Filter | FilterGroup>): Array<Filter | FilterGroup> {
+	const seen = new Set<string>();
+	const deduped: Array<Filter | FilterGroup> = [];
+	for (const condition of conditions) {
+		const key = JSON.stringify(condition);
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		deduped.push(condition);
+	}
+	return deduped;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -19,7 +19,9 @@ export const ENTRY_TEMPLATE_KEYS = new Set([
 	"updated",
 	"music",
 	"photos",
+	"reflection",
 	"attachments",
+	"places",
 ]);
 
 export function journalTemplateContext(
@@ -31,6 +33,8 @@ export function journalTemplateContext(
 	const music = musicTemplateItems(entry.musicAttachments ?? []);
 	const photos = photoTemplateItems(entry.photoAttachments ?? [], photoFiles);
 	const attachments = attachmentTemplateItems(entry, music, photos, photoFiles);
+	const reflection = attachments.filter((attachment) => attachment.assetType === "reflection");
+	const places = placeTemplateItems(entry.attachments ?? []);
 	return {
 		id: entry.id,
 		uuid: entry.id,
@@ -44,8 +48,10 @@ export function journalTemplateContext(
 		time: current,
 		music,
 		photos,
+		reflection,
 		attachments,
-		entry: entryTemplateObject(entry, music, photos, attachments),
+		places,
+		entry: entryTemplateObject(entry, music, photos, reflection, attachments, places),
 	};
 }
 
@@ -65,7 +71,9 @@ function entryTemplateObject(
 	entry: JournalEntryText,
 	music: Record<string, unknown>[],
 	photos: Record<string, unknown>[],
-	attachments: Record<string, unknown>[]
+	reflection: Record<string, unknown>[],
+	attachments: Record<string, unknown>[],
+	places: Record<string, unknown>[]
 ): Record<string, unknown> {
 	return {
 		id: entry.id,
@@ -78,8 +86,32 @@ function entryTemplateObject(
 		updated: entry.updated ?? "",
 		music,
 		photos,
+		reflection,
 		attachments,
+		places,
 	};
+}
+
+const MAP_ASSET_TYPES = new Set(["multiPinMap", "genericMap"]);
+
+function placeTemplateItems(attachments: JournalGenericAttachment[]): Record<string, unknown>[] {
+	const places: Record<string, unknown>[] = [];
+	for (const attachment of attachments) {
+		if (!MAP_ASSET_TYPES.has(attachment.assetType)) {
+			continue;
+		}
+		for (const visit of visitTemplateItems(attachment.metadata ?? {})) {
+			places.push({
+				...visit,
+				uuid: attachment.id,
+				id: attachment.id,
+				type: "place",
+				assetType: attachment.assetType,
+				title: visit.placeName || visit.city,
+			});
+		}
+	}
+	return places;
 }
 
 function attachmentTemplateItems(
@@ -144,13 +176,22 @@ function genericTemplateItem(
 			item.colorDark = metadataString(metadata, "colorDark");
 			break;
 		}
-		case "multiPinMap": {
+		case "multiPinMap":
+		case "genericMap": {
 			const visits = visitTemplateItems(metadata);
 			item.visits = visits;
 			item.title = visits
-				.map((visit) => visit.city)
+				.map((visit) => visit.placeName || visit.city)
 				.filter(Boolean)
 				.join(", ");
+			break;
+		}
+		case "motionActivity": {
+			const activityName = metadataString(metadata, "localizedActivityName");
+			item.title = activityName;
+			item.activity = metadataString(metadata, "activityType");
+			item.activityName = activityName;
+			item.steps = numericOrString(metadataString(metadata, "steps"));
 			break;
 		}
 		case "photo":
@@ -169,21 +210,23 @@ function genericTemplateItem(
 
 interface VisitTemplateItem extends Record<string, unknown> {
 	city: string;
+	placeName: string;
 }
 
 function visitTemplateItems(metadata: Record<string, unknown>): VisitTemplateItem[] {
-	const visits = metadata.visitsData;
-	if (!Array.isArray(visits)) {
-		return [];
-	}
+	const raw = metadata.visitsData;
+	// multiPinMap stores an array of visits; genericMap stores one object.
+	const visits = Array.isArray(raw) ? raw : raw ? [raw] : [];
 	return visits
 		.filter((visit): visit is Record<string, unknown> => typeof visit === "object" && visit !== null)
 		.map((visit) => ({
 			city: metadataString(visit, "city"),
+			placeName: metadataString(visit, "placeName"),
 			latitude: metadataNumber(visit, "latitude") ?? null,
 			longitude: metadataNumber(visit, "longitude") ?? null,
 			isWork: visit.isWork === true,
-			date: appleEpochToISO(metadataNumber(visit, "createdDate")),
+			date: appleEpochToISO(metadataNumber(visit, "visitStartTime") ?? metadataNumber(visit, "createdDate")),
+			endDate: appleEpochToISO(metadataNumber(visit, "visitEndTime")),
 		}));
 }
 
@@ -243,7 +286,8 @@ function photoTemplateItems(
 			return {
 				uuid: attachment.id,
 				id: attachment.id,
-				type: "photo",
+				type: attachment.assetType ?? "photo",
+				assetType: attachment.assetType ?? "photo",
 				source: attachment.source ?? "",
 				flags: {
 					hidden: attachment.isHidden === true,

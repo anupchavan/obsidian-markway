@@ -10,8 +10,10 @@ export interface MarkwaySettings {
 	deleteMarkdownFileWhenJournalDeleted: boolean;
 	journalProperties: JournalTemplateProperty[];
 	journalIncludeTitleHeading: boolean;
+	journalNoteNameTemplate: string;
 	journalContentTemplate: string;
 	journalPhotosProperty: string;
+	journalCreatedProperty: string;
 }
 
 export interface JournalTemplateProperty {
@@ -25,6 +27,7 @@ export interface JournalLink {
 	path: string;
 	title: string;
 	lastSyncedAt: string;
+	lastJournalCreated?: string;
 	lastMarkdownHash: string;
 	lastJournalHash: string;
 	lastJournalUpdated: string;
@@ -97,6 +100,7 @@ export interface JournalMusicAttachment {
 
 export interface JournalPhotoAttachment {
 	id: string;
+	assetType?: string;
 	source?: string;
 	isHidden?: boolean;
 	isSlim?: boolean;

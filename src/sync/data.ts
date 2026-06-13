@@ -18,6 +18,7 @@ const DEFAULT_DEBOUNCE_MS = 1200;
 
 export const DEFAULT_JOURNAL_FOLDER = "Journal";
 export const DEFAULT_JOURNAL_CONTENT_TEMPLATE = "{{content}}";
+export const DEFAULT_JOURNAL_NOTE_NAME_TEMPLATE = "{{title}}";
 export const DEFAULT_JOURNAL_PROPERTIES: JournalTemplateProperty[] = [
 	{
 		id: "music",
@@ -39,8 +40,10 @@ export function defaultMarkwaySettings(journalFolder = DEFAULT_JOURNAL_FOLDER): 
 		deleteMarkdownFileWhenJournalDeleted: false,
 		journalProperties: cloneJournalProperties(DEFAULT_JOURNAL_PROPERTIES),
 		journalIncludeTitleHeading: false,
+		journalNoteNameTemplate: DEFAULT_JOURNAL_NOTE_NAME_TEMPLATE,
 		journalContentTemplate: DEFAULT_JOURNAL_CONTENT_TEMPLATE,
 		journalPhotosProperty: "",
+		journalCreatedProperty: "",
 	};
 }
 
@@ -214,6 +217,7 @@ function readJournalLink(journalID: string, rawLink: unknown): JournalLink | nul
 		path: normalizePath(path),
 		title: stringValue(rawLink.title) || titleForFile(path),
 		lastSyncedAt: stringValue(rawLink.lastSyncedAt) || "",
+		lastJournalCreated: stringValue(rawLink.lastJournalCreated) || "",
 		lastMarkdownHash: stringValue(rawLink.lastMarkdownHash) || "",
 		lastJournalHash: stringValue(rawLink.lastJournalHash) || "",
 		lastJournalUpdated: stringValue(rawLink.lastJournalUpdated) || "",
@@ -281,11 +285,17 @@ function readTemplateSettings(value: Record<string, unknown>, settings: Partial<
 	if (typeof value.journalIncludeTitleHeading === "boolean") {
 		settings.journalIncludeTitleHeading = value.journalIncludeTitleHeading;
 	}
+	if (typeof value.journalNoteNameTemplate === "string") {
+		settings.journalNoteNameTemplate = value.journalNoteNameTemplate;
+	}
 	if (typeof value.journalContentTemplate === "string") {
 		settings.journalContentTemplate = value.journalContentTemplate;
 	}
 	if (typeof value.journalPhotosProperty === "string") {
 		settings.journalPhotosProperty = normalizeTemplatePropertyKey(value.journalPhotosProperty);
+	}
+	if (typeof value.journalCreatedProperty === "string") {
+		settings.journalCreatedProperty = normalizeTemplatePropertyKey(value.journalCreatedProperty);
 	}
 }
 
@@ -344,6 +354,9 @@ function frontmatterComparableValue(value: unknown): string {
 	}
 	if (typeof value === "number" || typeof value === "boolean") {
 		return String(value);
+	}
+	if (value instanceof Date) {
+		return Number.isFinite(value.getTime()) ? value.toISOString() : "";
 	}
 	try {
 		return JSON.stringify(value);

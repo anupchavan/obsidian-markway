@@ -2,7 +2,9 @@ import { PluginSettingTab, requireApiVersion, Setting } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
 import type MarkwayPlugin from "../main";
 import {
+	renderJournalCreatedPropertyControl,
 	renderJournalContentTemplateControl,
+	renderJournalNoteNameControl,
 	renderJournalPhotosPropertyControl,
 	renderJournalTemplatePropertyRow,
 } from "../journal-template-ui";
@@ -144,14 +146,23 @@ export class MarkwaySettingTab extends PluginSettingTab {
 				control: { type: "toggle", key: "deleteMarkdownFileWhenJournalDeleted", defaultValue: false },
 			},
 			this.propertiesItem(),
+			this.noteNameItem(),
 			this.contentTemplateItem(),
-			{
-				name: "Add title as heading",
-				desc: "Show the Journal title as the first Markdown heading when pulling entries.",
-				control: { type: "toggle", key: "journalIncludeTitleHeading", defaultValue: false },
-			},
+			this.createdPropertyItem(),
 			this.photosPropertyItem(),
 		];
+	}
+
+	private noteNameItem(): SettingDefinitionItem<MarkwaySettingKey> {
+		return {
+			name: "Note name",
+			desc: "Format for the file name of the entry. You can use variables like {{title}} and {{created}} to pre-populate data from the entry.",
+			render: (setting) => {
+				renderJournalNoteNameControl(setting, this.plugin, () => {
+					this.plugin.queueTemplateRefresh();
+				});
+			},
+		};
 	}
 
 	private contentTemplateItem(): SettingDefinitionItem<MarkwaySettingKey> {
@@ -178,6 +189,18 @@ export class MarkwaySettingTab extends PluginSettingTab {
 		};
 	}
 
+	private createdPropertyItem(): SettingDefinitionItem<MarkwaySettingKey> {
+		return {
+			name: "Created property",
+			desc: "Frontmatter property to read when pushing the journal created date. Edit it in Obsidian to update the journal entry date. Leave empty to disable.",
+			render: (setting) => {
+				renderJournalCreatedPropertyControl(setting, this.plugin, () => {
+					this.plugin.queueTemplateRefresh();
+				});
+			},
+		};
+	}
+
 	private rulesItem(): SettingDefinitionItem<MarkwaySettingKey> {
 		return {
 			name: "Rules",
@@ -193,11 +216,8 @@ export class MarkwaySettingTab extends PluginSettingTab {
 					async () => {
 						await this.plugin.savePluginData();
 					},
-					() => {
-							this.refreshDeclarativeSettings();
-						},
-						this.plugin.journalImportFolder()
-					);
+					this.plugin.journalImportFolder()
+				);
 			},
 		};
 	}

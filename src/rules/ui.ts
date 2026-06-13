@@ -12,11 +12,13 @@ import {
 	type TagSuggest,
 } from "./suggests";
 import {
+	defaultJournalRules,
 	fieldNeedsValue,
 	getOperatorsForField,
 	getPropertyIcon,
 	getPropertyLabel,
 	getPropertyType,
+	normalizeFilterGroup,
 	scanRuleProperties,
 	type Filter,
 	type FilterConjunction,
@@ -41,11 +43,22 @@ export function renderJournalRules(
 	app: App,
 	root: FilterGroup,
 	onSave: () => void | Promise<void>,
-	onRefresh: () => void,
 	defaultFolder = "Journal"
 ): void {
-	const rulesContainer = container.createDiv({ cls: "mw-rules-query-container" });
-	new JournalRulesBuilder(app, root, onSave, onRefresh, defaultFolder).render(rulesContainer);
+	let repairedInitialRules = false;
+	const redraw = () => {
+		if (!repairedInitialRules) {
+			repairedInitialRules = true;
+			const repaired = normalizeFilterGroup(root, defaultJournalRules(defaultFolder));
+			if (replaceFilterGroup(root, repaired)) {
+				void onSave();
+			}
+		}
+		container.empty();
+		const rulesContainer = container.createDiv({ cls: "mw-rules-query-container" });
+		new JournalRulesBuilder(app, root, onSave, redraw, defaultFolder).render(rulesContainer);
+	};
+	redraw();
 }
 
 class ComboboxSuggestModal extends FuzzySuggestModal<ComboboxItem> {
@@ -211,7 +224,7 @@ class JournalRulesBuilder {
 		private readonly app: App,
 		private readonly root: FilterGroup,
 		private readonly onSave: () => void | Promise<void>,
-		private readonly onRefresh: () => void,
+		private readonly redraw: () => void,
 		private readonly defaultFolder: string
 	) {
 			this.availableProperties = scanRuleProperties(app);
@@ -267,7 +280,7 @@ class JournalRulesBuilder {
 		if (!group.conditions.length) {
 			const rowWrapper = statementsContainer.createDiv({ cls: "mw-filter-row" });
 			rowWrapper.createSpan({ cls: "mw-conjunction", text: "Where" });
-			this.renderFilterRow(rowWrapper, this.defaultFilter(), group, -1, true);
+			this.renderFilterRow(rowWrapper, this.defaultFilter(), group, -1, true, false);
 		} else {
 			group.conditions.forEach((condition, index) => {
 				const rowWrapper = statementsContainer.createDiv({ cls: "mw-filter-row" });
@@ -299,7 +312,7 @@ class JournalRulesBuilder {
 			void this.saveAndRefresh();
 		});
 		this.createSimpleButton(actionsDiv, "plus", "Add filter group", () => {
-			group.conditions.push({ type: "group", operator: "AND", conditions: [] });
+			group.conditions.push({ type: "group", operator: "AND", conditions: [this.defaultFilter()] });
 			void this.saveAndRefresh();
 		});
 		if (isRoot) {
@@ -316,7 +329,8 @@ class JournalRulesBuilder {
 		filter: Filter,
 		parentGroup: FilterGroup,
 		index: number,
-		isPlaceholder = false
+		isPlaceholder = false,
+		showDelete = true
 	): void {
 		const statement = row.createDiv({ cls: "mw-filter-statement" });
 		const expression = statement.createDiv({ cls: "mw-filter-expression metadata-property" });
@@ -438,8 +452,10 @@ class JournalRulesBuilder {
 			}
 		}
 
-		const actions = expression.createDiv({ cls: "mw-filter-row-actions" });
-		createDeleteButton(actions, handleDelete);
+		if (showDelete) {
+			const actions = expression.createDiv({ cls: "mw-filter-row-actions" });
+			createDeleteButton(actions, handleDelete);
+		}
 	}
 
 	private ensureFilterInGroup(
@@ -471,18 +487,16 @@ class JournalRulesBuilder {
 	}
 
 	private createSimpleButton(container: HTMLElement, icon: string, text: string, onClick: () => void): void {
-		const button = container.createDiv({ cls: "mw-text-icon-button", attr: { tabindex: "0" } });
+		const button = container.createEl("button", {
+			cls: "mw-text-icon-button",
+			attr: { type: "button" },
+		});
 		setIcon(button.createSpan({ cls: "mw-text-button-icon" }), icon);
 		button.createSpan({ cls: "mw-text-button-label", text });
 		button.onclick = (event) => {
+			event.preventDefault();
 			event.stopPropagation();
 			onClick();
-		};
-		button.onkeydown = (event) => {
-			if (event.key === " " || event.key === "Enter") {
-				event.preventDefault();
-				onClick();
-			}
 		};
 	}
 
@@ -491,13 +505,20 @@ class JournalRulesBuilder {
 	}
 
 	private async saveAndRefresh(): Promise<void> {
+		this.redraw();
 		await this.save();
-		this.onRefresh();
 	}
 
 	private async save(): Promise<void> {
 		await this.onSave();
 	}
+}
+
+function replaceFilterGroup(target: FilterGroup, source: FilterGroup): boolean {
+	const before = JSON.stringify(target);
+	target.operator = source.operator;
+	target.conditions.splice(0, target.conditions.length, ...source.conditions);
+	return JSON.stringify(target) !== before;
 }
 
 function createComboboxButton(container: HTMLElement, label: string, icon?: string): HTMLElement {
@@ -518,6 +539,7 @@ function createDeleteButton(container: HTMLElement, onClick: (event: MouseEvent)
 	});
 	setIcon(button, "trash-2");
 	button.onclick = (event) => {
+		event.preventDefault();
 		event.stopPropagation();
 		onClick(event);
 	};

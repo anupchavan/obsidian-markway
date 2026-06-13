@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
 	journalTemplateNeedsAttachments,
+	journalTemplateNeedsAttachmentMetadata,
 	journalTemplateNeedsMusic,
 	journalTemplateNeedsPhotos,
 	journalTemplateSettingsHash,
 	journalBodyContent,
+	journalCreatedDateFromNoteName,
+	journalTitleFromNoteName,
 	parseJournalBodySections,
 	renderJournalBodySections,
 	renderJournalContent,
+	renderJournalNoteName,
 	renderJournalTemplateProperties,
 	serializeJournalBody,
 	splitContentTemplate,
@@ -16,6 +20,7 @@ import {
 	validateContentTemplate,
 	validateTemplateVariables,
 } from "../src/journal-template";
+import dayjs from "dayjs";
 import { defaultMarkwaySettings, type JournalEntryText, type MarkwaySettings } from "../src/sync-utils";
 
 const entry: JournalEntryText = {
@@ -306,6 +311,20 @@ describe("photo templates", () => {
 		expect(rendered.properties.taken).toEqual(["2024-10-31T16:27:58.321Z", ""]);
 	});
 
+	it("treats photos as photo, video, and live photo attachments", () => {
+		const rendered = renderJournalTemplateProperties({
+			...entry,
+			photoAttachments: [
+				...(entry.photoAttachments ?? []),
+				{ id: "VIDEO-ID", assetType: "video", files: [{ id: "VIDEO-FILE", name: "video", relativePath: "ENTRY-ID/VIDEO-ID/clip.mov" }] },
+				{ id: "LIVE-ID", assetType: "livePhoto", files: [{ id: "LIVE-FILE", name: "image", relativePath: "ENTRY-ID/LIVE-ID/live.heic" }] },
+			],
+		}, settingsWith([
+			{ id: "types", key: "photo_types", value: "{{photos|map:item => item.type}}" },
+		]));
+		expect(rendered.properties.photo_types).toEqual(["photo", "photo", "video", "livePhoto"]);
+	});
+
 	it("tracks generated photo property items for removal sync", () => {
 		const rendered = renderJournalTemplateProperties(entry, settingsWith([
 			{ id: "photos", key: "photos", value: "{{photos|map:item => item.fileName|wikilink}}" },
@@ -409,6 +428,15 @@ describe("content templates", () => {
 			journalPhotosProperty: "photos",
 		}));
 	});
+
+	it("keeps the created property setting push-only", () => {
+		const settings = {
+			...defaultMarkwaySettings(),
+			journalCreatedProperty: "created_at",
+		};
+		expect(journalTemplateSettingsHash(defaultMarkwaySettings())).toBe(journalTemplateSettingsHash(settings));
+		expect(renderJournalTemplateProperties(entry, settings).properties.created_at).toBeUndefined();
+	});
 });
 
 describe("generic attachments variable", () => {
@@ -448,8 +476,31 @@ describe("generic attachments variable", () => {
 				assetType: "multiPinMap",
 				metadata: {
 					visitsData: [
-						{ city: "Mamidipalle", latitude: 17.59, longitude: 78.12, isWork: false, createdDate: 802197235.61 },
+						{ city: "Mamidipalle", placeName: "Mumbai Highway", latitude: 17.59, longitude: 78.12, isWork: false, createdDate: 802197235.61 },
 					],
+				},
+			},
+			{
+				id: "GENERIC-MAP-ID",
+				assetType: "genericMap",
+				metadata: {
+					visitsData: {
+						city: "",
+						placeName: "IITH Main Road",
+						latitude: 17.5806134,
+						longitude: 78.1197393,
+						visitStartTime: 802673883.39,
+						visitEndTime: 802675091.06,
+					},
+				},
+			},
+			{
+				id: "WALK-ID",
+				assetType: "motionActivity",
+				metadata: {
+					activityType: "walk",
+					localizedActivityName: "Walk",
+					steps: "1019",
 				},
 			},
 		],
@@ -459,7 +510,7 @@ describe("generic attachments variable", () => {
 		const rendered = renderJournalTemplateProperties(genericEntry, settingsWith([
 			{ id: "p", key: "kinds", value: "{{attachments|map:item => item.type}}" },
 		]));
-		expect(rendered.properties.kinds).toEqual(["photo", "music", "reflection", "multiPinMap"]);
+		expect(rendered.properties.kinds).toEqual(["photo", "music", "reflection", "multiPinMap", "genericMap", "motionActivity"]);
 	});
 
 	it("exposes type-specific titles", () => {
@@ -470,7 +521,9 @@ describe("generic attachments variable", () => {
 			"photo.heic",
 			"Sahiba",
 			"Who is your wisest friend?",
-			"Mamidipalle",
+			"Mumbai Highway",
+			"IITH Main Road",
+			"Walk",
 		]);
 	});
 
@@ -483,6 +536,26 @@ describe("generic attachments variable", () => {
 		]));
 		expect(rendered.properties.color).toBe("#3B3E52");
 		expect(rendered.properties.city).toBe("Mamidipalle");
+	});
+
+	it("exposes decoded reflections as their own variable", () => {
+		const rendered = renderJournalTemplateProperties(genericEntry, settingsWith([
+			{ id: "p1", key: "reflection_prompt", value: "{{reflection|template:\"${prompt}\"|trim}}" },
+			{ id: "p2", key: "reflection_light", value: "{{entry.reflection|template:\"${colorLight}\"|trim}}" },
+			{ id: "p3", key: "reflection_dark", value: "{{reflection|template:\"${colorDark}\"|trim}}" },
+		]));
+		expect(rendered.properties.reflection_prompt).toBe("Who is your wisest friend?");
+		expect(rendered.properties.reflection_light).toBe("#212438");
+		expect(rendered.properties.reflection_dark).toBe("#3B3E52");
+	});
+
+	it("skips empty generated frontmatter properties", () => {
+		const rendered = renderJournalTemplateProperties({ ...entry, photoAttachments: [] }, settingsWith([
+			{ id: "photos", key: "photos", value: "{{photos}}" },
+			{ id: "blank", key: "blank", value: "   " },
+			{ id: "count", key: "photo_count", value: "{{photos|length}}" },
+		]));
+		expect(rendered.properties).toEqual({ photo_count: 0 });
 	});
 
 	it("converts photo capture dates from the Apple epoch", () => {
@@ -499,6 +572,34 @@ describe("generic attachments variable", () => {
 		expect(rendered.properties.kinds).toEqual(["music", "music", "photo", "photo"]);
 	});
 
+	it("flattens map visits into the places variable", () => {
+		const rendered = renderJournalTemplateProperties(genericEntry, settingsWith([
+			{ id: "p1", key: "places", value: "{{places|map:item => item.title}}" },
+			{ id: "p2", key: "starts", value: "{{places|map:item => item.date}}" },
+		]));
+		expect(rendered.properties.places).toEqual(["Mumbai Highway", "IITH Main Road"]);
+		expect(rendered.properties.starts).toEqual([
+			"2026-06-03T16:33:55.610Z",
+			"2026-06-09T04:58:03.390Z",
+		]);
+	});
+
+	it("exposes walk activity details", () => {
+		const rendered = renderJournalTemplateProperties(genericEntry, settingsWith([
+			{ id: "p", key: "steps", value: "{{attachments|template:\"${steps}\"|trim}}" },
+		]));
+		expect(rendered.properties.steps).toBe(1019);
+	});
+
+	it("requests generic attachments when places is used", () => {
+		expect(journalTemplateNeedsAttachments(settingsWith([
+			{ id: "p", key: "places", value: "{{places|length}}" },
+		]))).toBe(true);
+		expect(journalTemplateNeedsAttachments(settingsWith([
+			{ id: "p", key: "reflection", value: "{{reflection|length}}" },
+		]))).toBe(true);
+	});
+
 	it("requests generic attachments only when templates use them", () => {
 		expect(journalTemplateNeedsAttachments(settingsWith([
 			{ id: "p", key: "kinds", value: "{{attachments|length}}" },
@@ -510,6 +611,101 @@ describe("generic attachments variable", () => {
 			...defaultMarkwaySettings(),
 			journalContentTemplate: "{{entry.attachments|length}}\n{{content}}",
 		})).toBe(true);
+	});
+
+	it("treats attachment templates as metadata dependencies", () => {
+		expect(journalTemplateNeedsAttachmentMetadata(settingsWith([
+			{ id: "p", key: "title", value: "{{title}}" },
+		]))).toBe(false);
+		expect(journalTemplateNeedsAttachmentMetadata(settingsWith([
+			{ id: "p", key: "photos", value: "{{photos|length}}" },
+		]))).toBe(true);
+		expect(journalTemplateNeedsAttachmentMetadata(settingsWith([
+			{ id: "p", key: "places", value: "{{places|length}}" },
+		]))).toBe(true);
+		expect(journalTemplateNeedsAttachmentMetadata(settingsWith([
+			{ id: "p", key: "reflection", value: "{{reflection|length}}" },
+		]))).toBe(true);
+		expect(journalTemplateNeedsAttachmentMetadata({
+			...defaultMarkwaySettings(),
+			journalPhotosProperty: "photos",
+		})).toBe(true);
+	});
+});
+
+describe("note names", () => {
+	const NAME_TEMPLATE = "{{created|date:\"YYYY-MM-DD HHmm\"}} {{title}}";
+
+	it("renders note names from the template", () => {
+		expect(renderJournalNoteName(entry, {
+			...defaultMarkwaySettings(),
+			journalNoteNameTemplate: NAME_TEMPLATE,
+		})).toBe(`${dayjs("2026-06-05T01:02:03Z").format("YYYY-MM-DD HHmm")} Flexoki`);
+	});
+
+	it("falls back to the title for blank or broken name templates", () => {
+		expect(renderJournalNoteName(entry, {
+			...defaultMarkwaySettings(),
+			journalNoteNameTemplate: "  ",
+		})).toBe("Flexoki");
+		expect(renderJournalNoteName(entry, {
+			...defaultMarkwaySettings(),
+			journalNoteNameTemplate: "{{nope}}",
+		})).toBe("Flexoki");
+	});
+
+	it("recovers the title from a templated note name", () => {
+		expect(journalTitleFromNoteName("2026-06-11 1530 My Trip to Goa", NAME_TEMPLATE)).toBe("My Trip to Goa");
+	});
+
+	it("keeps titles containing date-like text", () => {
+		expect(journalTitleFromNoteName("2026-06-11 1530 Planning 2027-01-01 party", NAME_TEMPLATE))
+			.toBe("Planning 2027-01-01 party");
+	});
+
+	it("uses the whole name when the template does not match", () => {
+		expect(journalTitleFromNoteName("Quick idea", NAME_TEMPLATE)).toBe("Quick idea");
+		expect(journalTitleFromNoteName("Quick idea", "{{title}}")).toBe("Quick idea");
+		expect(journalTitleFromNoteName("2026-06-11", "{{created|date:\"YYYY-MM-DD\"}}")).toBe("2026-06-11");
+	});
+
+	it("parses created times from the configured note name template", () => {
+		const parsed = journalCreatedDateFromNoteName(
+			"12 Mar 2026 4:49 PM - At it again",
+			"{{created|date:\"DD MMM YYYY h:mm A\"}} - {{title}}"
+		);
+		expect(parsed).toMatchObject({
+			raw: "12 Mar 2026 4:49 PM",
+			format: "DD MMM YYYY h:mm A",
+			hasDate: true,
+			hasTime: true,
+		});
+		expect(parsed?.date.getFullYear()).toBe(2026);
+		expect(parsed?.date.getMonth()).toBe(2);
+		expect(parsed?.date.getDate()).toBe(12);
+		expect(parsed?.date.getHours()).toBe(16);
+		expect(parsed?.date.getMinutes()).toBe(49);
+	});
+
+	it("parses sanitized date separators and bracketed literals", () => {
+		const parsed = journalCreatedDateFromNoteName(
+			"2026.03.12 at 16-49 At it again",
+			"{{created|date:\"YYYY.MM.DD [at] HH:mm\"}} {{title}}"
+		);
+		expect(parsed?.raw).toBe("2026.03.12 at 16-49");
+		expect(parsed?.hasDate).toBe(true);
+		expect(parsed?.hasTime).toBe(true);
+		expect(parsed?.date.getHours()).toBe(16);
+		expect(parsed?.date.getMinutes()).toBe(49);
+	});
+
+	it("detects date-only note name templates", () => {
+		const parsed = journalCreatedDateFromNoteName(
+			"2026-03-12 At it again",
+			"{{created|date:\"YYYY-MM-DD\"}} {{title}}"
+		);
+		expect(parsed?.hasDate).toBe(true);
+		expect(parsed?.hasTime).toBe(false);
 	});
 });
 

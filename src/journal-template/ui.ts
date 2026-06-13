@@ -43,28 +43,53 @@ export function renderJournalTemplateSettings(
 		.setDesc("Controls the note body when pulling journal entries.")
 		.setHeading();
 
+	const noteNameSetting = new Setting(container)
+		.setName("Note name")
+		.setDesc("Format for the file name of the entry. You can use variables like {{title}} and {{created}} to pre-populate data from the entry.");
+	renderJournalNoteNameControl(noteNameSetting, plugin, onTemplateChanged);
+
 	const contentSetting = new Setting(container)
 		.setName("Content template")
 		.setDesc("Template for the note body. {{content}} is the journal entry text.");
 	renderJournalContentTemplateControl(contentSetting, plugin, onTemplateChanged);
 
-	new Setting(container)
-		.setName("Add title as heading")
-		.setDesc("Show the journal title as the first Markdown heading when pulling entries.")
-		.addToggle((toggle) =>
-			toggle
-				.setValue(plugin.settings.journalIncludeTitleHeading)
-				.onChange(async (value) => {
-					plugin.settings.journalIncludeTitleHeading = value;
-					await plugin.savePluginData();
-					onTemplateChanged();
-				})
-		);
-
 	const photosSetting = new Setting(container)
 		.setName("Photos property")
-		.setDesc("Markway downloads journal photos into your attachment folder and lists them in this property. Remove a value to delete that journal photo, or add an image or video from your vault to attach it. Leave empty to disable.");
+		.setDesc("Markway downloads journal photos and videos into your attachment folder and lists them in this property. Remove a value to delete that journal attachment, or add an image or video from your vault to attach it. Leave empty to disable.");
 	renderJournalPhotosPropertyControl(photosSetting, plugin, onTemplateChanged);
+
+	const createdSetting = new Setting(container)
+		.setName("Created property")
+		.setDesc("Frontmatter property to read when pushing the journal created date. Edit it in Obsidian to update the journal entry date. Leave empty to disable.");
+	renderJournalCreatedPropertyControl(createdSetting, plugin, onTemplateChanged);
+}
+
+export function renderJournalNoteNameControl(
+	setting: Setting,
+	plugin: MarkwayPlugin,
+	onTemplateChanged: () => void = () => { }
+): void {
+	let warningsEl: HTMLElement | null = null;
+
+	const renderWarnings = () => {
+		warningsEl?.remove();
+		warningsEl = renderSettingWarnings(setting, validateTemplateVariables(plugin.settings.journalNoteNameTemplate));
+	};
+
+	setting.addText((text) => {
+		text.setPlaceholder("{{title}}");
+		text.setValue(plugin.settings.journalNoteNameTemplate);
+		text.inputEl.addEventListener("change", () => {
+			void (async () => {
+				plugin.settings.journalNoteNameTemplate = text.inputEl.value;
+				await plugin.savePluginData();
+				renderWarnings();
+				onTemplateChanged();
+			})();
+		});
+	});
+
+	renderWarnings();
 }
 
 export function renderJournalContentTemplateControl(
@@ -103,14 +128,52 @@ export function renderJournalPhotosPropertyControl(
 	plugin: MarkwayPlugin,
 	onTemplateChanged: () => void = () => { }
 ): void {
+	renderJournalPropertyKeyControl(
+		setting,
+		plugin,
+		"Photos",
+		() => plugin.settings.journalPhotosProperty,
+		(value) => {
+			plugin.settings.journalPhotosProperty = value;
+		},
+		onTemplateChanged
+	);
+}
+
+export function renderJournalCreatedPropertyControl(
+	setting: Setting,
+	plugin: MarkwayPlugin,
+	onTemplateChanged: () => void = () => { }
+): void {
+	renderJournalPropertyKeyControl(
+		setting,
+		plugin,
+		"created",
+		() => plugin.settings.journalCreatedProperty,
+		(value) => {
+			plugin.settings.journalCreatedProperty = value;
+		},
+		onTemplateChanged
+	);
+}
+
+function renderJournalPropertyKeyControl(
+	setting: Setting,
+	plugin: MarkwayPlugin,
+	placeholder: string,
+	getValue: () => string,
+	setValue: (value: string) => void,
+	onTemplateChanged: () => void
+): void {
 	setting.addText((text) => {
-		text.setPlaceholder("Photos");
-		text.setValue(plugin.settings.journalPhotosProperty);
+		text.setPlaceholder(placeholder);
+		text.setValue(getValue());
 
 		const save = (raw: string) => {
 			void (async () => {
-				plugin.settings.journalPhotosProperty = normalizeTemplatePropertyKey(raw);
-				text.inputEl.value = plugin.settings.journalPhotosProperty;
+				const value = normalizeTemplatePropertyKey(raw);
+				setValue(value);
+				text.inputEl.value = value;
 				await plugin.savePluginData();
 				onTemplateChanged();
 			})();

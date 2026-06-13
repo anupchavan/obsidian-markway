@@ -20,6 +20,16 @@ export function hasMatchingJournalSummary(link: JournalLink, summary: JournalEnt
 		&& link.title === summary.title;
 }
 
+export function canSkipJournalEntryForSummary(
+	link: JournalLink,
+	summary: JournalEntrySummary,
+	options: { templateNeedsRefresh: boolean; metadataNeedsRefresh: boolean }
+): boolean {
+	return hasMatchingJournalSummary(link, summary)
+		&& !options.templateNeedsRefresh
+		&& !options.metadataNeedsRefresh;
+}
+
 export function hasMarkdownChangedSinceLastSync(link: JournalLink, markdown: string): boolean {
 	return Boolean(link.lastMarkdownHash) && sha256Hex(markdown) !== link.lastMarkdownHash;
 }

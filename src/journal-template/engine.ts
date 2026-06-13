@@ -15,7 +15,9 @@ export const JOURNAL_TEMPLATE_VARIABLES = new Set([
 	"time",
 	"music",
 	"photos",
+	"reflection",
 	"attachments",
+	"places",
 	"entry",
 ]);
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_JOURNAL_FOLDER,
 	DEFAULT_JOURNAL_PROPERTIES,
+	canSkipJournalEntryForSummary,
 	composeMarkdown,
 	defaultMarkwaySettings,
 	describeUnknown,
@@ -188,27 +189,60 @@ describe("journal links", () => {
 	});
 
 	it("matches journal summaries by updated date and title", () => {
+		const link = {
+			journalID: "A",
+			path: "A.md",
+			title: "Title",
+			lastSyncedAt: "",
+			lastMarkdownHash: "",
+			lastJournalHash: "",
+			lastJournalUpdated: "u",
+			lastTemplateHash: "",
+			lastTemplateSettingsHash: "",
+			lastTemplatePropertyKeys: [],
+			lastTemplateProperties: {},
+			lastAttachmentPropertyItems: {},
+			lastContentPrefix: "",
+			lastContentSuffix: "",
+			lastBodySections: [],
+			lastPhotoFiles: {},
+		};
+		const summary = { id: "A", status: "active", created: "", updated: "u", title: "Title" };
 		expect(hasMatchingJournalSummary(
-			{
-				journalID: "A",
-				path: "A.md",
-				title: "Title",
-				lastSyncedAt: "",
-				lastMarkdownHash: "",
-				lastJournalHash: "",
-				lastJournalUpdated: "u",
-					lastTemplateHash: "",
-					lastTemplateSettingsHash: "",
-					lastTemplatePropertyKeys: [],
-					lastTemplateProperties: {},
-					lastAttachmentPropertyItems: {},
-					lastContentPrefix: "",
-					lastContentSuffix: "",
-					lastBodySections: [],
-					lastPhotoFiles: {},
-				},
-			{ id: "A", status: "active", created: "", updated: "u", title: "Title" }
+			link,
+			summary
 		)).toBe(true);
+		expect(canSkipJournalEntryForSummary(
+			link,
+			summary,
+			{ templateNeedsRefresh: false, metadataNeedsRefresh: false }
+		)).toBe(true);
+	});
+
+	it("does not skip matching summaries when template metadata needs refresh", () => {
+		const link = {
+			journalID: "A",
+			path: "A.md",
+			title: "Title",
+			lastSyncedAt: "",
+			lastMarkdownHash: "",
+			lastJournalHash: "",
+			lastJournalUpdated: "u",
+			lastTemplateHash: "",
+			lastTemplateSettingsHash: "",
+			lastTemplatePropertyKeys: [],
+			lastTemplateProperties: {},
+			lastAttachmentPropertyItems: {},
+			lastContentPrefix: "",
+			lastContentSuffix: "",
+			lastBodySections: [],
+			lastPhotoFiles: {},
+		};
+		expect(canSkipJournalEntryForSummary(
+			link,
+			{ id: "A", status: "active", created: "", updated: "u", title: "Title" },
+			{ templateNeedsRefresh: false, metadataNeedsRefresh: true }
+		)).toBe(false);
 	});
 
 	it("does not match summaries without updated dates", () => {
@@ -416,6 +450,7 @@ describe("generated attachment frontmatter", () => {
 			"[[Sahiba]]",
 			"[[Cornfield Chase]]",
 		]);
+		expect(frontmatterComparableValues(new Date("2026-06-05T01:02:03Z"))).toEqual(["2026-06-05T01:02:03.000Z"]);
 	});
 
 	it("detects a simple removal from generated frontmatter", () => {
@@ -560,6 +595,12 @@ describe("generated photo frontmatter", () => {
 	it("reads the photos property setting", () => {
 		expect(readSettings({ journalPhotosProperty: " photos " })).toMatchObject({
 			journalPhotosProperty: "photos",
+		});
+	});
+
+	it("reads the created property setting", () => {
+		expect(readSettings({ journalCreatedProperty: " created_at " })).toMatchObject({
+			journalCreatedProperty: "created_at",
 		});
 	});
 
