@@ -218,7 +218,10 @@ function readJournalLink(journalID: string, rawLink: unknown): JournalLink | nul
 	if (!path) {
 		return null;
 	}
-	const id = stringValue(rawLink.journalID) || journalID;
+	const id = stringValue(rawLink.journalID) || stringValue(journalID);
+	if (!id) {
+		return null;
+	}
 	return {
 		journalID: id,
 		path: normalizePath(path),

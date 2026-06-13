@@ -172,6 +172,10 @@ describe("journal links", () => {
 		expect(readJournalLinks({ A: { journalID: "A" } })).toEqual({});
 	});
 
+	it("ignores links without journal IDs", () => {
+		expect(readJournalLinks({ " ": { journalID: " ", path: "Journal/Entry.md" } })).toEqual({});
+	});
+
 	it("normalizes link records", () => {
 		const links = readJournalLinks({
 			A: {
