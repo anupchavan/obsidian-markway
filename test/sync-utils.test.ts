@@ -26,6 +26,7 @@ import {
 	addedFrontmatterValues,
 	removedGeneratedAttachmentIDs,
 	sameVaultPath,
+	safePathSegments,
 	sanitizeFileName,
 	sha256Hex,
 	splitMarkdown,
@@ -395,9 +396,15 @@ describe("paths and file names", () => {
 	it.each([
 		[" /Journal/ ", "Journal"],
 		["Journal/Sub/", "Journal/Sub"],
+		["../Journal/./Trips", "Journal/Trips"],
+		["..", ""],
 		["", ""],
 	] as const)("normalizes folder %s", (input, expected) => {
 		expect(normalizeFolder(input)).toBe(expected);
+	});
+
+	it("drops unsafe path segments", () => {
+		expect(safePathSegments("Journal/../Trips/./Entry")).toEqual(["Journal", "Trips", "Entry"]);
 	});
 
 	it("builds title from a markdown path", () => {
@@ -409,7 +416,7 @@ describe("paths and file names", () => {
 	});
 
 	it("removes unsafe filename separators", () => {
-		expect(sanitizeFileName("A/B:C")).toBe("A-B-C");
+		expect(sanitizeFileName("A/B\\C:D")).toBe("A-B-C-D");
 	});
 
 	it("collapses filename whitespace", () => {

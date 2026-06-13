@@ -21,7 +21,7 @@ export function titleForFile(path: string): string {
 export function sanitizeFileName(value: string): string {
 	const trimmed = value.trim() || "Journal Entry";
 	return trimmed
-		.replace(/[/:]/g, "-")
+		.replace(/[\\/:]/g, "-")
 		.split("")
 		.filter((character) => character.charCodeAt(0) >= 32)
 		.join("")
@@ -31,7 +31,7 @@ export function sanitizeFileName(value: string): string {
 }
 
 export function normalizeFolder(value: string): string {
-	return normalizePath(value.trim()).replace(/^\/+|\/+$/g, "");
+	return safePathSegments(normalizePath(value.trim()).replace(/^\/+|\/+$/g, "")).join("/");
 }
 
 export function normalizePath(path: string): string {
@@ -43,4 +43,11 @@ export function normalizePath(path: string): string {
 
 export function canonicalPath(path: string): string {
 	return resolve(path);
+}
+
+export function safePathSegments(path: string): string[] {
+	return path
+		.split("/")
+		.map((part) => part.trim())
+		.filter((part) => part && part !== "." && part !== "..");
 }

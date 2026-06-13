@@ -1,5 +1,5 @@
 import type { DataAdapter } from "obsidian";
-import { normalizePath, sleep, type JournalEntrySummary, type JournalEntryText } from "../sync-utils";
+import { isRecord, normalizePath, sleep, type JournalEntrySummary, type JournalEntryText } from "../sync-utils";
 
 export interface BridgeRequest {
 	id: string;
@@ -156,7 +156,7 @@ export class MarkwayBridgeClient {
 			if (await this.adapter.exists(responsePath)) {
 				const text = await this.adapter.read(responsePath);
 				await this.removeIfExists(responsePath);
-				return JSON.parse(text) as BridgeResponse;
+				return this.parseBridgeResponse(text, id);
 			}
 			await sleep(350);
 		}
@@ -218,6 +218,29 @@ export class MarkwayBridgeClient {
 			id: typeof value.id === "string" ? value.id : "",
 			kind: value.kind,
 			createdAt: typeof value.createdAt === "string" ? value.createdAt : "",
+		};
+	}
+
+	private parseBridgeResponse(text: string, expectedID: string): BridgeResponse {
+		const value: unknown = JSON.parse(text);
+		if (!isRecord(value)) {
+			throw new Error("Invalid Markway bridge response");
+		}
+		if (value.id !== expectedID) {
+			throw new Error("Mismatched Markway bridge response");
+		}
+		if (typeof value.ok !== "boolean") {
+			throw new Error("Invalid Markway bridge response");
+		}
+
+		return {
+			id: value.id,
+			ok: value.ok,
+			message: typeof value.message === "string" ? value.message : "",
+			journalID: typeof value.journalID === "string" ? value.journalID : undefined,
+			entry: isRecord(value.entry) ? value.entry as unknown as JournalEntryText : undefined,
+			entries: Array.isArray(value.entries) ? value.entries as JournalEntrySummary[] : undefined,
+			completedAt: typeof value.completedAt === "string" ? value.completedAt : "",
 		};
 	}
 }

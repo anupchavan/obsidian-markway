@@ -142,8 +142,8 @@ The plugin release workflow is:
 Create a tag:
 
 ```zsh
-git tag 0.1.2
-git push origin 0.1.2
+git tag 0.1.3
+git push origin 0.1.3
 ```
 
 The workflow builds and publishes a draft GitHub release containing:

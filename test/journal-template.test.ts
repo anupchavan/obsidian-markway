@@ -669,6 +669,13 @@ describe("note names", () => {
 		expect(journalTitleFromNoteName("2026-06-11", "{{created|date:\"YYYY-MM-DD\"}}")).toBe("2026-06-11");
 	});
 
+	it("recovers titles when literal backslashes were sanitized in filenames", () => {
+		expect(journalTitleFromNoteName(
+			"2026-06-11 - My Trip",
+			"{{created|date:\"YYYY-MM-DD\"}} \\ {{title}}"
+		)).toBe("My Trip");
+	});
+
 	it("parses created times from the configured note name template", () => {
 		const parsed = journalCreatedDateFromNoteName(
 			"12 Mar 2026 4:49 PM - At it again",
@@ -695,6 +702,21 @@ describe("note names", () => {
 		expect(parsed?.raw).toBe("2026.03.12 at 16-49");
 		expect(parsed?.hasDate).toBe(true);
 		expect(parsed?.hasTime).toBe(true);
+		expect(parsed?.date.getHours()).toBe(16);
+		expect(parsed?.date.getMinutes()).toBe(49);
+	});
+
+	it("parses created dates when backslash date separators were sanitized", () => {
+		const parsed = journalCreatedDateFromNoteName(
+			"2026-03-12 16-49 At it again",
+			"{{created|date:\"YYYY\\MM\\DD HH:mm\"}} {{title}}"
+		);
+		expect(parsed?.raw).toBe("2026-03-12 16-49");
+		expect(parsed?.hasDate).toBe(true);
+		expect(parsed?.hasTime).toBe(true);
+		expect(parsed?.date.getFullYear()).toBe(2026);
+		expect(parsed?.date.getMonth()).toBe(2);
+		expect(parsed?.date.getDate()).toBe(12);
 		expect(parsed?.date.getHours()).toBe(16);
 		expect(parsed?.date.getMinutes()).toBe(49);
 	});

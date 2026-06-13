@@ -9,6 +9,7 @@ import {
 	getPropertyIcon,
 	getPropertyLabel,
 	inferPropertyType,
+	normalizeFolderValue,
 	normalizeFilterGroup,
 	scanRuleProperties,
 	type Filter,
@@ -109,6 +110,10 @@ describe("journal rule defaults", () => {
 
 	it("derives an import folder from a nested rule", () => {
 		expect(firstFolderFromRules(group("OR", [group("AND", [filter("file", "in folder", "/Daily/")])]))).toBe("Daily");
+	});
+
+	it("removes unsafe segments when deriving import folders from rules", () => {
+		expect(firstFolderFromRules(group("OR", [filter("file", "in folder", "../Daily/./Trips")]))).toBe("Daily/Trips");
 	});
 
 	it("derives an import folder from file.folder text rules", () => {
@@ -353,6 +358,10 @@ describe("number and date operators", () => {
 });
 
 describe("normalization and property discovery", () => {
+	it("normalizes folder values without path traversal segments", () => {
+		expect(normalizeFolderValue("\\Journal\\..\\Daily\\.\\Trips\\")).toBe("Journal/Daily/Trips");
+	});
+
 	it("normalizes invalid groups to the fallback", () => {
 		expect(normalizeFilterGroup({ bad: true }, defaultJournalRules("Diary"))).toEqual(defaultJournalRules("Diary"));
 	});

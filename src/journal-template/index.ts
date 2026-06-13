@@ -401,7 +401,7 @@ function parseNoteNameDate(raw: string, format: string): dayjs.Dayjs {
 }
 
 function sanitizedDateFormat(format: string): string {
-	return format.replace(/[/:]/g, "-");
+	return format.replace(/[\\/:]/g, "-");
 }
 
 function noteNameVariablePattern(filters: string[]): string {
@@ -484,6 +484,8 @@ function noteNameLiteralPattern(value: string): string {
 			pattern += "[:-]";
 		} else if (character === "/") {
 			pattern += "[/-]";
+		} else if (character === "\\") {
+			pattern += "[\\\\-]";
 		} else {
 			pattern += escapeRegExp(character);
 		}

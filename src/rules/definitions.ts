@@ -149,5 +149,12 @@ export function inferFieldType(field: string): PropertyType {
 }
 
 export function normalizeFolderValue(value: string): string {
-	return value.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	return value
+		.trim()
+		.replace(/\\/g, "/")
+		.replace(/^\/+|\/+$/g, "")
+		.split("/")
+		.map((part) => part.trim())
+		.filter((part) => part && part !== "." && part !== "..")
+		.join("/");
 }
